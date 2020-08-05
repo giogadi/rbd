@@ -1,0 +1,82 @@
+=== 7/22/2020 ===
+
+Ideas:
+* Add rotation + rotational velocity
+* Add forces/torques
+* Add impulses
+
+=== 7/25/2020 ===
+
+WOW! Okay so we gotta implement:
+
+* Detection of point-face contact
+* Detection of edge-edge contact
+* "Find all contact points"
+* Find time of collision
+* Compute impulse
+* Apply impulse to bodies
+
+Nah, let's begin with collision detection then.
+
+If 2 polyhedra are disjoint or contacting (but not penetrating), there exists a separating plane where EITHER:
+* the plane contains a face of one of the polyhedra, OR
+* the plane contains an edge from one of the polyhedra AND is parallel to an edge of the other polyhedron
+    * i.e., the plane's normal is the cross product of 1 edge of one polyhedron and 1 edge of the other polyhedron and contains one of the edges.
+Only need to check vertices on either side of the plane (not edges or faces).
+
+When you find a valid sep. plane, it either came from a face or a pair of edges. Choose that face or pair of edges as the "defining face/edges". In following time steps, as long as that sep plane remains valid then def no collision. If it becomes invalid, try again to find a sep plane from scratch. If nothing, then you got a collision, buddy. QUESTION: do we need to store ALL the failing sep planes for collision response? I guess if dt is small, this should usually be a very small set of planes (if > 1 even).
+
+When there's a collision, most of the time it's either:
+(a) vertex inside another polyhedron
+(b) edge intersecting a face (actually, if (a) is false, then doesn't the intersecting edge always cross _two_ faces?)
+
+Then when checking some earlier time to find the time of collision, can look _first_ at either the vertex from (a) or the edge+face from (b) to have a good chance of getting a fast answer to the question.
+
+So let's break it down. We need:
+
+* get all vertices of a box
+* get all faces of a box
+* get all edges of a box
+* check whether all points of a polyhedron are on one side of a plane. + side or - side?
+
+=== 7/26/2020 ===
+
+Yoooo....does it actually work? Feels super expensive doesn't it? Whatever.
+
+So what comes next?
+* Tidy a little bit
+* Compute time of collision
+* Add impulses
+* Compute impulses from collision
+
+Okay so shiiiiii you refactored and it doesn't quite work yet. That's ok! We'll get there duder.
+
+YESSSSS it works with the cute lil refactor. Now we're ready to:
+(1) clean up commented shit
+(2) return defining edges/faces
+
+TIME OF COLLISION
+
+So NOW we have something stupid to work try to iterate on. Now we can probably take a real stab at the time-of-collision calculation. Wait a sec, quick check: how do we get the vertex-face or edge-edge collision from here?
+
+Well, no. Before we proceed to time-of-collision we should maybe be more sure of how we will compute our set of contacts.
+
+......should we just implement GJK? lol.
+
+Kay, we're close now. We should proceed by maybe rendering the face+vertex or edge+edge pair at close collisions to see if they make sense.
+
+Now we gotta compute contact points. Easy for vertex-face, but the hard one might be edge-edge. We need the edge-edge collision _normal_, and we need it to point in a specific direction: away from A.
+
+If the edges are part of 2 polyhedra that are apart, then we should maybe just look for the side that B is on or whatever. ezpz, right?
+
+So NOW we need "closest point on plane" I guess?
+
+Okay: Next, we should implement time-to-collision+contacts!
+
+We have something kinda working but it sometimes doesn't. Let's set up a doesn't-work example and maybe even make some unit tests.
+
+What could we use to debug this?
+* iterate by step
+* visualize the contact and the normal
+
+Yo. VICTORY.
