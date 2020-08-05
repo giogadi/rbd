@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use kiss3d;
 use nalgebra as na;
 
@@ -7,7 +9,7 @@ use kiss3d::light::Light;
 
 use physics;
 
-fn draw_face_normals(tmesh: &mut physics::TransformedMesh, window: &mut Window, vertex_color: &na::Point3<f32>) {
+fn draw_face_normals(tmesh: &physics::TransformedMesh, window: &mut Window, vertex_color: &na::Point3<f32>) {
     for quad in tmesh.mesh.quads.iter() {
         let v0 = tmesh.get_vertex(quad[0]);
         let v1 = tmesh.get_vertex(quad[1]);
@@ -18,20 +20,20 @@ fn draw_face_normals(tmesh: &mut physics::TransformedMesh, window: &mut Window, 
     }
 }
 
-fn draw_edges(tmesh: &mut physics::TransformedMesh, window: &mut Window, vertex_color: &na::Point3<f32>) {
+fn draw_edges(tmesh: &physics::TransformedMesh, window: &mut Window, vertex_color: &na::Point3<f32>) {
     for &(v1, v2) in tmesh.mesh.edges.iter() {
         window.draw_line(&na::Point3::from(tmesh.get_vertex(v1)), &na::Point3::from(tmesh.get_vertex(v2)), vertex_color);
         window.draw_line(&na::Point3::from(tmesh.get_vertex(v1)), &na::Point3::from(tmesh.get_vertex(v2)), vertex_color);
     }
 }
 
-fn draw_vertices(tmesh: &mut physics::TransformedMesh, window: &mut Window, vertex_color: &na::Point3<f32>) {
+fn draw_vertices(tmesh: &physics::TransformedMesh, window: &mut Window, vertex_color: &na::Point3<f32>) {
     for v in 0..tmesh.mesh.vertices.len() {
         window.draw_point(&na::Point3::from(tmesh.get_vertex(v)), vertex_color);
     }
 }
 
-fn draw_separating_plane_info(sep_plane: physics::SeparatingPlane, tmesh1: &mut physics::TransformedMesh, tmesh2: &mut physics::TransformedMesh,
+fn draw_separating_plane_info(sep_plane: physics::SeparatingPlane, tmesh1: &physics::TransformedMesh, tmesh2: &physics::TransformedMesh,
                               window: &mut Window, vertex_color: &na::Point3<f32>) {
     match sep_plane {
         physics::SeparatingPlane::Mesh1Face(f, v_idx) => {
@@ -83,7 +85,7 @@ fn draw_separating_plane_info(sep_plane: physics::SeparatingPlane, tmesh1: &mut 
     };
 }
 
-fn draw_vertex_velocities<'a>(rb: &physics::RigidBody, tmesh: &mut physics::TransformedMesh<'a>, window: &mut Window, color: &na::Point3<f32>) {
+fn draw_vertex_velocities(rb: &physics::RigidBody, tmesh: &physics::TransformedMesh, window: &mut Window, color: &na::Point3<f32>) {
     for i in 0..tmesh.mesh.vertices.len() {
         let p = tmesh.get_vertex(i);
         let v_dir = rb.get_point_velocity(&tmesh.get_vertex(i)).normalize();
@@ -101,27 +103,28 @@ fn main() {
 
     window.set_light(Light::StickToCamera);
 
-    let box_mesh = physics::unit_box_mesh();
+    let box_mesh = Rc::new(physics::unit_box_mesh());
     
-    let mut rb1 = physics::RigidBody::new_box(1.0, "red", 1.0, 1.0, 1.0);
-    rb1.q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, na::RealField::frac_pi_4(), 0.0));
-    rb1.l = na::Vector3::new(0.0, 0.0, 0.25);
-    let mut tmesh1 = physics::TransformedMesh::new(&box_mesh, rb1.get_transform());
+    let mut rb1 = physics::RigidBody::new_box(1.0, "red", 1.0, 1.0, 1.0, &box_mesh);
+    let x: na::Vector3<f32> = Default::default();
+    let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, na::RealField::frac_pi_4(), 0.0));
+    rb1.set_pose(&x, &q);
+    // rb1.l = na::Vector3::new(0.0, 0.0, 0.25);
     let mut c1      = window.add_cube(rb1.scale[0], rb1.scale[1], rb1.scale[2]);
-    c1.data_mut().set_local_rotation(rb1.q);
-    c1.data_mut().set_local_translation(na::Translation3::from(rb1.x));
+    c1.data_mut().set_local_rotation(rb1.q());
+    c1.data_mut().set_local_translation(na::Translation3::from(rb1.x()));
     c1.set_color(1.0, 0.0, 0.0);
 
-    let mut rb2 = physics::RigidBody::new_box(1.0, "green", 1.0, 1.0, 1.0);
-    rb2.x = na::Vector3::new(-2.5, 0.0, 0.0);
-    rb2.q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, na::RealField::frac_pi_4(), na::RealField::frac_pi_4()));
-    // rb2.q = na::UnitQuaternion::from_euler_angles(0.7938401, -1.3559403, -2.985731);
+    let mut rb2 = physics::RigidBody::new_box(1.0, "green", 1.0, 1.0, 1.0, &box_mesh);
+    let x = na::Vector3::new(-2.5, 0.0, 0.0);
+    let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, na::RealField::frac_pi_4(), na::RealField::frac_pi_4()));
+    // let q = na::UnitQuaternion::from_euler_angles(0.7938401, -1.3559403, -2.985731);
+    rb2.set_pose(&x, &q);
     rb2.p = na::Vector3::new(0.5, 0.0, 0.0);
     // rb2.l = na::Vector3::new(0.0, 0.5, 0.0);
-    let mut tmesh2 = physics::TransformedMesh::new(&box_mesh, rb2.get_transform());
     let mut c2      = window.add_cube(rb2.scale[0], rb2.scale[1], rb2.scale[2]);
-    c2.data_mut().set_local_rotation(rb2.q);
-    c2.data_mut().set_local_translation(na::Translation3::from(rb2.x));
+    c2.data_mut().set_local_rotation(rb2.q());
+    c2.data_mut().set_local_translation(na::Translation3::from(rb2.x()));
     c2.set_color(0.0, 1.0, 0.0);
     
     let fps: u64 = 60; 
@@ -157,11 +160,11 @@ fn main() {
             }
         }
 
-        c1.data_mut().set_local_rotation(rb1.q);
-        c1.data_mut().set_local_translation(na::Translation3::<f32>::from(rb1.x));
+        c1.data_mut().set_local_rotation(rb1.q());
+        c1.data_mut().set_local_translation(na::Translation3::<f32>::from(rb1.x()));
 
-        c2.data_mut().set_local_rotation(rb2.q);
-        c2.data_mut().set_local_translation(na::Translation3::<f32>::from(rb2.x));
+        c2.data_mut().set_local_rotation(rb2.q());
+        c2.data_mut().set_local_translation(na::Translation3::<f32>::from(rb2.x()));
 
         // let force = na::Vector3::new(0.05, 0.0, 0.0);
         let force = na::Vector3::new(0.0, 0.0, 0.0);
@@ -170,7 +173,7 @@ fn main() {
 
         if !paused || do_step {
             // initial_guess = physics::update(&mut rb1, &mut tmesh1, &mut rb2, &mut tmesh2, initial_guess, dt);
-            let update_info = physics::update(&mut rb1, &mut tmesh1, &mut rb2, &mut tmesh2, initial_guess, dt);
+            let update_info = physics::update(&mut rb1, &mut rb2, initial_guess, dt);
             initial_guess = Some(update_info.sep_plane);
             contact_info = update_info.contact_info;
             do_step = false;

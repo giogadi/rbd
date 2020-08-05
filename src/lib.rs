@@ -1,32 +1,57 @@
+use std::rc::Rc;
+use std::cell::RefCell;
+
 use nalgebra as na;
 
 pub type Float = f32;
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct RigidBody {
-    pub x: na::Vector3<Float>,  // position
-    pub q: na::UnitQuaternion<Float>,  // rotation
+    x: na::Vector3<Float>,  // position
+    q: na::UnitQuaternion<Float>,  // rotation
     pub p: na::Vector3<Float>,  // momentum
     pub l: na::Vector3<Float>,  // angular momentum
     pub m_inv: Float, // mass
     pub i_body_inv: na::Matrix3<Float>,
     pub name: String,
+    tmesh: TransformedMesh,
     // TODO FIGURE OUT HOW TO REMOVE THIS
     pub scale: na::Vector3<Float> // dimensions (assuming it's a box)
 }
 
 impl RigidBody {
-    pub fn new_box(m: Float, name: &str, x_dim: Float, y_dim: Float, z_dim: Float) -> RigidBody {
+    pub fn new_box(m: Float, name: &str, x_dim: Float, y_dim: Float, z_dim: Float, mesh: &Rc<Mesh>) -> RigidBody {
         let x2 = x_dim*x_dim;
         let y2 = y_dim*y_dim;
         let z2 = z_dim*z_dim;
+        let transform = Transform {
+            p: Default::default(),
+            rot: na::Matrix3::identity(),
+            scale: na::Vector3::new(x_dim, y_dim, z_dim)
+        };
         RigidBody {
+            x: Default::default(),
+            q: Default::default(),
+            p: Default::default(),
+            l: Default::default(),
             m_inv: 1.0 / m,
             i_body_inv: na::Matrix3::from_diagonal(&((12.0 / m) * na::Vector3::new(1.0 / (y2 + z2), 1.0 / (x2 + z2), 1.0 / (x2 + y2)))),
-            scale: na::Vector3::new(x_dim, y_dim, z_dim),
             name: String::from(name),
-            ..Default::default()
+            tmesh: TransformedMesh::new(&Rc::clone(mesh), transform),
+            scale: na::Vector3::new(x_dim, y_dim, z_dim),
         }
+    }
+
+    pub fn x(&self) -> na::Vector3<Float> {
+        return self.x;
+    }
+
+    pub fn q(&self) -> na::UnitQuaternion<Float> {
+        return self.q;
+    }
+
+    pub fn tmesh(&self) -> &TransformedMesh {
+        return &self.tmesh;
     }
 
     // TODO: Consider caching derived values like w, rot, I_inv, etc.
@@ -65,6 +90,12 @@ impl RigidBody {
         self.q = na::UnitQuaternion::from_quaternion(self.q.quaternion() + dt * dq);
         self.p += dt * dp;
         self.l += dt * dl;
+
+        self.tmesh.set_transform(Transform {
+            p: self.x,
+            rot: self.q.to_rotation_matrix().matrix().clone(),
+            scale: self.scale
+        });
     }
 
     pub fn get_transform(&self) -> Transform {
@@ -73,6 +104,20 @@ impl RigidBody {
             rot: self.q.to_rotation_matrix().matrix().clone(),
             scale: self.scale
         }
+    }
+
+    fn update_transform(&mut self) {
+        self.tmesh.set_transform(Transform {
+            p: self.x,
+            rot: self.q.to_rotation_matrix().matrix().clone(),
+            scale: self.scale
+        });
+    }
+
+    pub fn set_pose(&mut self, x: &na::Vector3<Float>, q: &na::UnitQuaternion<Float>) {
+        self.x = *x;
+        self.q = *q;
+        self.update_transform();
     }
 }
 
@@ -118,6 +163,7 @@ pub fn unit_box_mesh() -> Mesh {
     return Mesh { vertices, edges, quads};
 }
 
+#[derive(Clone)]
 pub struct Transform {
     pub p: na::Vector3<Float>,
     pub rot: na::Matrix3<Float>,
@@ -133,26 +179,26 @@ fn transform_point(transform: &Transform, p: &na::Vector3<Float>) -> na::Vector3
     
 }
 
-pub struct TransformedMesh<'a> {
-    pub mesh: &'a Mesh,
+#[derive(Clone)]
+pub struct TransformedMesh {
+    pub mesh: Rc<Mesh>,
     transform: Transform,
-    transformed_vert_cache: Vec<Option<na::Vector3<Float>>>,
-
+    transformed_vert_cache: RefCell<Vec<Option<na::Vector3<Float>>>>
 }
 
 // TODO try to follow interior mutability pattern
-impl<'a> TransformedMesh<'a> {
-    pub fn new(mesh: &'a Mesh, transform: Transform) -> TransformedMesh<'a> {
+impl TransformedMesh {
+    pub fn new(mesh: &Rc<Mesh>, transform: Transform) -> TransformedMesh {
         TransformedMesh {
-            mesh,
+            mesh: Rc::clone(mesh),
             transform,
-            transformed_vert_cache: vec![None; mesh.vertices.len()]
+            transformed_vert_cache: RefCell::new(vec![None; mesh.vertices.len()])
         }
     }
 
     // Is there a way to make this return a & and make find_separating_plane still work?
-    pub fn get_vertex(&mut self, index: usize) -> na::Vector3<Float> {
-        let v = &mut self.transformed_vert_cache[index];
+    pub fn get_vertex(&self, index: usize) -> na::Vector3<Float> {
+        let v = &mut self.transformed_vert_cache.borrow_mut()[index];
         if v.is_some() {
             return v.unwrap();
         }
@@ -162,13 +208,13 @@ impl<'a> TransformedMesh<'a> {
 
     pub fn set_transform(&mut self, transform: Transform) {
         self.transform = transform;
-        for v in self.transformed_vert_cache.iter_mut() {
+        for v in self.transformed_vert_cache.borrow_mut().iter_mut() {
             *v = None;
         }
     }
 }
 
-fn does_face_plane_separate_meshes<'a>(mesh1: &mut TransformedMesh<'a>, face_on_mesh1: &[usize; 4], mesh2: &mut TransformedMesh<'a>) -> Option<(Float, usize)> {
+fn does_face_plane_separate_meshes<'a>(mesh1: &TransformedMesh, face_on_mesh1: &[usize; 4], mesh2: &TransformedMesh) -> Option<(Float, usize)> {
     let v0 = mesh1.get_vertex(face_on_mesh1[0]);
     let v1 = mesh1.get_vertex(face_on_mesh1[1]);
     let v2 = mesh1.get_vertex(face_on_mesh1[2]);
@@ -193,8 +239,8 @@ fn does_face_plane_separate_meshes<'a>(mesh1: &mut TransformedMesh<'a>, face_on_
 // Returns:
 // 0: min dist of mesh2's verts from plane
 // 1: pair of dists: edge_on_mesh2's vertex dists from plane
-fn does_edge_plane_separate_meshes<'a>(mesh1: &mut TransformedMesh<'a>, edge_on_mesh1: (usize, usize),
-                                       mesh2: &mut TransformedMesh<'a>, edge_on_mesh2: (usize, usize)) -> Option<(Float, (Float, Float))> {
+fn does_edge_plane_separate_meshes<'a>(mesh1: &TransformedMesh, edge_on_mesh1: (usize, usize),
+                                       mesh2: &TransformedMesh, edge_on_mesh2: (usize, usize)) -> Option<(Float, (Float, Float))> {
     let (m1v1, m1v2) = edge_on_mesh1;
     let (m2v1, m2v2) = edge_on_mesh2;
     let plane_p = mesh1.get_vertex(m1v1);
@@ -247,7 +293,7 @@ pub enum SeparatingPlane {
     Edges((usize, usize), (usize, usize))
 }
 
-pub fn find_separating_plane<'a>(mesh1: &mut TransformedMesh<'a>, mesh2: &mut TransformedMesh<'a>,
+pub fn find_separating_plane<'a>(mesh1: &TransformedMesh, mesh2: &TransformedMesh,
                                  initial_guess: Option<SeparatingPlane>) -> Option<(SeparatingPlane, Float)> {
     if initial_guess.is_some() {
         let initial_guess = initial_guess.unwrap();
@@ -276,6 +322,7 @@ pub fn find_separating_plane<'a>(mesh1: &mut TransformedMesh<'a>, mesh2: &mut Tr
     }
     
     // Look for a separating plane in the faces of mesh1 and mesh2.
+    // TODO: 
     for f in mesh1.mesh.quads.iter() {
         let d = does_face_plane_separate_meshes(mesh1, f, mesh2);
         if d.is_some() {
@@ -364,19 +411,17 @@ pub struct UpdateInfo {
     pub contact_info: Option<ContactInfo>
 }
 
-pub fn update<'a>(rb1_in: &mut RigidBody, tmesh1: &mut TransformedMesh<'a>,
-                  rb2_in: &mut RigidBody, tmesh2: &mut TransformedMesh<'a>,
+pub fn update<'a>(rb1_in: &mut RigidBody,
+                  rb2_in: &mut RigidBody,
                   mut prev_sep_plane: Option<SeparatingPlane>,
                   dt_in: Float) -> UpdateInfo {
     let mut rb1 = rb1_in.clone();
     rb1.update(&na::Vector3::new(0.0, 0.0, 0.0), &na::Vector3::new(0.0, 0.0, 0.0), dt_in);
-    tmesh1.set_transform(rb1.get_transform());
 
     let mut rb2 = rb2_in.clone();
     rb2.update(&na::Vector3::new(0.0, 0.0, 0.0), &na::Vector3::new(0.0, 0.0, 0.0), dt_in);
-    tmesh2.set_transform(rb2.get_transform());
     
-    let mut new_sep_plane = find_separating_plane(tmesh1, tmesh2, prev_sep_plane);
+    let mut new_sep_plane = find_separating_plane(rb1.tmesh(), rb2.tmesh(), prev_sep_plane);
     
     // TODO: Here, if we see a separating plane FIRST, we early-exit. However, the shapes might already be within the threshold
     // of collision we look for below. Should we check for that?
@@ -395,16 +440,12 @@ pub fn update<'a>(rb1_in: &mut RigidBody, tmesh1: &mut TransformedMesh<'a>,
         n = n + 1;
         // QUESTION: when simulating forward from a collision-free state, should we play from t=0 or starting from that later state?
         rb1 = rb1_in.clone();
-        tmesh1.set_transform(rb1.get_transform());
         rb1.update(&na::Vector3::new(0.0, 0.0, 0.0), &na::Vector3::new(0.0, 0.0, 0.0), dt);
-        tmesh1.set_transform(rb1.get_transform());
 
         rb2 = rb2_in.clone();
-        tmesh2.set_transform(rb2.get_transform());
         rb2.update(&na::Vector3::new(0.0, 0.0, 0.0), &na::Vector3::new(0.0, 0.0, 0.0), dt);
-        tmesh2.set_transform(rb2.get_transform());
         
-        new_sep_plane = find_separating_plane(tmesh1, tmesh2, prev_sep_plane);
+        new_sep_plane = find_separating_plane(rb1.tmesh(), rb2.tmesh(), prev_sep_plane);
         if new_sep_plane.is_some() {
             let (sep_plane, d) = new_sep_plane.unwrap();
             println!("ITERATING: {}", d.abs());
@@ -431,21 +472,21 @@ pub fn update<'a>(rb1_in: &mut RigidBody, tmesh1: &mut TransformedMesh<'a>,
 
     let contact_info = {
         let sep_plane = new_sep_plane.unwrap().0;
-        let (rb_to, rb_from, tmesh_to, tmesh_from, contact_type) = match sep_plane {
+        let (rb_to, rb_from, contact_type) = match sep_plane {
             SeparatingPlane::Mesh1Face(f, v) => {
                 println!("mesh1 face");
-                (&mut rb2, &mut rb1, tmesh2, tmesh1, ContactType::VertexFace(v, f))
+                (&mut rb2, &mut rb1, ContactType::VertexFace(v, f))
             },
             SeparatingPlane::Mesh2Face(f, v) => {
                 println!("mesh2 face");
-                (&mut rb1, &mut rb2, tmesh1, tmesh2, ContactType::VertexFace(v, f))
+                (&mut rb1, &mut rb2, ContactType::VertexFace(v, f))
             },
             SeparatingPlane::Edges(e1, e2) => {
                 println!("edges");
-                (&mut rb1, &mut rb2, tmesh1, tmesh2, ContactType::EdgeEdge(e1, e2))
+                (&mut rb1, &mut rb2, ContactType::EdgeEdge(e1, e2))
             }
         };
-        let mut contact = make_contact(contact_type, rb_to, rb_from, tmesh_to, tmesh_from);
+        let mut contact = make_contact(contact_type, rb_to, rb_from);
 
         let impulse = apply_impulses_from_contact(&mut contact);
 
@@ -478,25 +519,24 @@ struct Contact<'a> {
 }
 
 fn make_contact<'a, 'b>(contact_type: ContactType,
-                        rb_to: &'a mut RigidBody, rb_from: &'a mut RigidBody,
-                        tmesh_to: &'a mut TransformedMesh<'b>, tmesh_from: &'a mut TransformedMesh<'b>) -> Contact<'a> {
+                        rb_to: &'a mut RigidBody, rb_from: &'a mut RigidBody) -> Contact<'a> {
     let (position, normal) = match contact_type {
         ContactType::VertexFace(to_v, from_f) => {
-            let u = tmesh_from.get_vertex(from_f[1]) - tmesh_from.get_vertex(from_f[0]);
-            let v = tmesh_from.get_vertex(from_f[2]) - tmesh_from.get_vertex(from_f[0]);
+            let u = rb_from.tmesh().get_vertex(from_f[1]) - rb_from.tmesh().get_vertex(from_f[0]);
+            let v = rb_from.tmesh().get_vertex(from_f[2]) - rb_from.tmesh().get_vertex(from_f[0]);
             let plane_n = u.cross(&v).normalize();
-            (closest_point_on_plane_to_point(&tmesh_to.get_vertex(to_v), &tmesh_from.get_vertex(from_f[0]), &plane_n),
+            (closest_point_on_plane_to_point(&rb_to.tmesh().get_vertex(to_v), &rb_from.tmesh().get_vertex(from_f[0]), &plane_n),
                 plane_n)
         },
         ContactType::EdgeEdge((to_v0, to_v1), (from_v0, from_v1)) => {
-            let u = tmesh_to.get_vertex(to_v1) - tmesh_to.get_vertex(to_v0);
-            let v = tmesh_from.get_vertex(from_v1) - tmesh_from.get_vertex(from_v0);
+            let u = rb_to.tmesh().get_vertex(to_v1) - rb_to.tmesh().get_vertex(to_v0);
+            let v = rb_from.tmesh().get_vertex(from_v1) - rb_from.tmesh().get_vertex(from_v0);
             let mut edge_n = u.cross(&v).normalize();
-            if point_on_positive_side_of_plane(&tmesh_from.get_vertex(from_v0), &tmesh_to.get_vertex(to_v0), &edge_n) {
+            if point_on_positive_side_of_plane(&rb_from.tmesh().get_vertex(from_v0), &rb_to.tmesh().get_vertex(to_v0), &edge_n) {
                 edge_n = -edge_n;
             }
-            (closest_points_on_edges(&tmesh_to.get_vertex(to_v0), &tmesh_to.get_vertex(to_v1),
-                                        &tmesh_from.get_vertex(from_v0), &tmesh_from.get_vertex(from_v1)).1,  // arbitrarily use from's point as the contact point
+            (closest_points_on_edges(&rb_to.tmesh().get_vertex(to_v0), &rb_to.tmesh().get_vertex(to_v1),
+                                     &rb_from.tmesh().get_vertex(from_v0), &rb_from.tmesh().get_vertex(from_v1)).1,  // arbitrarily use from's point as the contact point
                 edge_n)
         }
     };
@@ -541,76 +581,72 @@ mod tests {
 
     #[test]
     fn basic_separating_plane_no_collision_test() {
-        let box_mesh = unit_box_mesh();
-        let rb1 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0);
-        let mut tmesh1 = TransformedMesh::new(&box_mesh, rb1.get_transform());
+        let box_mesh = Rc::new(unit_box_mesh());
+        let rb1 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0, &box_mesh);
 
-        let mut rb2 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0);
-        rb2.x = na::Vector3::new(-2.5, 0.0, 0.0);
-        rb2.q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(na::RealField::frac_pi_4(), 0.0, na::RealField::frac_pi_4()));
-        let mut tmesh2 = TransformedMesh::new(&box_mesh, rb2.get_transform());
+        let mut rb2 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0, &box_mesh);
+        let x = na::Vector3::new(-2.5, 0.0, 0.0);
+        let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(na::RealField::frac_pi_4(), 0.0, na::RealField::frac_pi_4()));
+        rb2.set_pose(&x, &q);
 
-        let sep_plane = find_separating_plane(&mut tmesh1, &mut tmesh2, None);
+        let sep_plane = find_separating_plane(rb1.tmesh(), rb2.tmesh(), None);
         assert!(sep_plane.is_some());
-        assert!(find_separating_plane(&mut tmesh1, &mut tmesh2, Some(sep_plane.unwrap().0)).is_some());
+        assert!(find_separating_plane(rb1.tmesh(), rb2.tmesh(), Some(sep_plane.unwrap().0)).is_some());
     }
 
     #[test]
     fn separating_plane_face_vertex_collision_test() {
-        let box_mesh = unit_box_mesh();
-        let rb1 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0);
-        let mut tmesh1 = TransformedMesh::new(&box_mesh, rb1.get_transform());
+        let box_mesh = Rc::new(unit_box_mesh());
+        let rb1 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0, &box_mesh);
 
-        let mut rb2 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0);
+        let mut rb2 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0, &box_mesh);
         let d = 0.5 + 0.5*(2.0 as f32).sqrt() - 0.1;
-        rb2.x = na::Vector3::new(-d, 0.0, 0.0);
-        rb2.q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(na::RealField::frac_pi_4(), 0.0, na::RealField::frac_pi_4()));
-        let mut tmesh2 = TransformedMesh::new(&box_mesh, rb2.get_transform());
+        let x = na::Vector3::new(-d, 0.0, 0.0);
+        let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(na::RealField::frac_pi_4(), 0.0, na::RealField::frac_pi_4()));
+        rb2.set_pose(&x, &q);
 
-        assert!(find_separating_plane(&mut tmesh1, &mut tmesh2, None).is_none());
+        assert!(find_separating_plane(rb1.tmesh(), rb2.tmesh(), None).is_none());
     }
 
     #[test]
     fn separating_plane_edge_face_collision_test() {
-        let box_mesh = unit_box_mesh();
-        let mut rb1 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0);
-        rb1.q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, na::RealField::frac_pi_4(), 0.0));
-        let mut tmesh1 = TransformedMesh::new(&box_mesh, rb1.get_transform());
+        let box_mesh = Rc::new(unit_box_mesh());
+        let mut rb1 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0, &box_mesh);
+        let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, na::RealField::frac_pi_4(), 0.0));
+        rb1.set_pose(&rb1.x(), &q);
 
-        let mut rb2 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0);
+        let mut rb2 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0, &box_mesh);
         let d : f32 = (2.0 as f32).sqrt() - 0.1;
-        rb2.x = na::Vector3::new(-d, 0.0, 0.0);
-        rb2.q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, 0.0, na::RealField::frac_pi_4()));
-        let mut tmesh2 = TransformedMesh::new(&box_mesh, rb1.get_transform());
+        let x = na::Vector3::new(-d, 0.0, 0.0);
+        let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, 0.0, na::RealField::frac_pi_4()));
+        rb2.set_pose(&x, &q);
 
-        assert!(find_separating_plane(&mut tmesh1, &mut tmesh2, None).is_none());
+        assert!(find_separating_plane(rb1.tmesh(), rb2.tmesh(), None).is_none());
     }
 
     #[test]
     fn separating_plane_no_collision_requires_edge_edge() {
-        let box_mesh = unit_box_mesh();
-        let mut rb1 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0);
-        rb1.q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, na::RealField::frac_pi_4(), 0.0));
-        let mut tmesh1 = TransformedMesh::new(&box_mesh, rb1.get_transform());
+        let box_mesh = Rc::new(unit_box_mesh());
+        let mut rb1 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0, &box_mesh);
+        let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, na::RealField::frac_pi_4(), 0.0));
+        rb1.set_pose(&rb1.x(), &q);
 
-        let mut rb2 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0);
-        rb2.x = na::Vector3::new(-1.7, 0.0, 0.0);
-        rb2.q = na::UnitQuaternion::from_euler_angles(0.7938401, -1.3559403, -2.985731);
-        let mut tmesh2 = TransformedMesh::new(&box_mesh, rb2.get_transform());
+        let mut rb2 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0, &box_mesh);
+        let x = na::Vector3::new(-1.7, 0.0, 0.0);
+        let q = na::UnitQuaternion::from_euler_angles(0.7938401, -1.3559403, -2.985731);
+        rb2.set_pose(&x, &q);
 
-        assert!(find_separating_plane(&mut tmesh1, &mut tmesh2, None).is_some());
+        assert!(find_separating_plane(&rb1.tmesh(), &rb2.tmesh(), None).is_some());
     }
 
     #[test]
     fn  separating_plane_maybe_degenerate_collision_test() {
-        let box_mesh = unit_box_mesh();
-        let rb1 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0);
-        let mut tmesh1 = TransformedMesh::new(&box_mesh, rb1.get_transform());
+        let box_mesh = Rc::new(unit_box_mesh());
+        let rb1 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0, &box_mesh);
 
-        let mut rb2 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0);
-        rb2.x = na::Vector3::new(-0.9, 0.0, 0.0);
-        let mut tmesh2 = TransformedMesh::new(&box_mesh, rb2.get_transform());
+        let mut rb2 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0, &box_mesh);
+        rb2.set_pose(&na::Vector3::new(-0.9, 0.0, 0.0), &rb2.q());
 
-        assert!(find_separating_plane(&mut tmesh1, &mut tmesh2, None).is_none());
+        assert!(find_separating_plane(&rb1.tmesh(), &rb2.tmesh(), None).is_none());
     }
 }
