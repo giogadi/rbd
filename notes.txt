@@ -79,4 +79,6 @@ What could we use to debug this?
 * iterate by step
 * visualize the contact and the normal
 
-Yo. VICTORY.
+Yo. VICTORY. Maybe let's try setting it off in a room and see what happens
+
+NEXT: create a PhysicsScene that owns all the rb's and handles all the pair-wise collision checking.

@@ -98,33 +98,36 @@ fn main() {
     let eye = na::Point3::new(10.0f32, 10.0, 10.0);
     let at = na::Point3::origin();
     let mut camera = kiss3d::camera::ArcBall::new(eye, at);
-    // let mut camera = kiss3d::camera::FirstPerson::new(eye, at);
-    // camera.set_move_step(0.1);
 
     window.set_light(Light::StickToCamera);
 
+    let mut ps = physics::Scene::new();
+
     let box_mesh = Rc::new(physics::unit_box_mesh());
     
-    let mut rb1 = physics::RigidBody::new_box(1.0, "red", 1.0, 1.0, 1.0, &box_mesh);
+    let scale = [1.0, 1.0, 1.0];
+    let mut rb1 = physics::RigidBody::new_box(1.0, "red", scale[0], scale[1], scale[2], &box_mesh);
     let x: na::Vector3<f32> = Default::default();
     let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, na::RealField::frac_pi_4(), 0.0));
     rb1.set_pose(&x, &q);
     // rb1.l = na::Vector3::new(0.0, 0.0, 0.25);
-    let mut c1      = window.add_cube(rb1.scale[0], rb1.scale[1], rb1.scale[2]);
-    c1.data_mut().set_local_rotation(rb1.q());
-    c1.data_mut().set_local_translation(na::Translation3::from(rb1.x()));
+    let rb1 = ps.add_rb(rb1);
+    let mut c1      = window.add_cube(scale[0], scale[1], scale[2]);
+    c1.data_mut().set_local_rotation(ps.get_rb(rb1).q());
+    c1.data_mut().set_local_translation(na::Translation3::from(ps.get_rb(rb1).x()));
     c1.set_color(1.0, 0.0, 0.0);
 
-    let mut rb2 = physics::RigidBody::new_box(1.0, "green", 1.0, 1.0, 1.0, &box_mesh);
+    let mut rb2 = physics::RigidBody::new_box(1.0, "green", scale[0], scale[1], scale[2], &box_mesh);
     let x = na::Vector3::new(-2.5, 0.0, 0.0);
     let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, na::RealField::frac_pi_4(), na::RealField::frac_pi_4()));
     // let q = na::UnitQuaternion::from_euler_angles(0.7938401, -1.3559403, -2.985731);
     rb2.set_pose(&x, &q);
     rb2.p = na::Vector3::new(0.5, 0.0, 0.0);
     // rb2.l = na::Vector3::new(0.0, 0.5, 0.0);
-    let mut c2      = window.add_cube(rb2.scale[0], rb2.scale[1], rb2.scale[2]);
-    c2.data_mut().set_local_rotation(rb2.q());
-    c2.data_mut().set_local_translation(na::Translation3::from(rb2.x()));
+    let rb2 = ps.add_rb(rb2);
+    let mut c2      = window.add_cube(scale[0], scale[1], scale[2]);
+    c2.data_mut().set_local_rotation(ps.get_rb(rb2).q());
+    c2.data_mut().set_local_translation(na::Translation3::from(ps.get_rb(rb2).x()));
     c2.set_color(0.0, 1.0, 0.0);
     
     let fps: u64 = 60; 
@@ -137,10 +140,9 @@ fn main() {
 
     window.set_point_size(2.0);
     
-    let mut initial_guess = None;
-    let mut contact_info = None;
     let mut paused = true;
     let mut do_step = false;
+    let mut n = 1;
     while window.render_with_camera(&mut camera) {
         for mut event in window.events().iter() {
             match event.value {
@@ -160,52 +162,25 @@ fn main() {
             }
         }
 
-        c1.data_mut().set_local_rotation(rb1.q());
-        c1.data_mut().set_local_translation(na::Translation3::<f32>::from(rb1.x()));
+        c1.data_mut().set_local_rotation(ps.get_rb(rb1).q());
+        c1.data_mut().set_local_translation(na::Translation3::<f32>::from(ps.get_rb(rb1).x()));
 
-        c2.data_mut().set_local_rotation(rb2.q());
-        c2.data_mut().set_local_translation(na::Translation3::<f32>::from(rb2.x()));
+        c2.data_mut().set_local_rotation(ps.get_rb(rb2).q());
+        c2.data_mut().set_local_translation(na::Translation3::<f32>::from(ps.get_rb(rb2).x()));
 
         // let force = na::Vector3::new(0.05, 0.0, 0.0);
         let force = na::Vector3::new(0.0, 0.0, 0.0);
         // let torque = na::Vector3::new(0.0, 0.07, 0.0);
         let torque = na::Vector3::new(0.0, 0.0, 0.0);
 
-        if !paused || do_step {
-            // initial_guess = physics::update(&mut rb1, &mut tmesh1, &mut rb2, &mut tmesh2, initial_guess, dt);
-            let update_info = physics::update(&mut rb1, &mut rb2, initial_guess, dt);
-            initial_guess = Some(update_info.sep_plane);
-            contact_info = update_info.contact_info;
+        if !paused || do_step {            
+            ps.update(dt);
             do_step = false;
+            // println!("ITERATION {}", n);
+            n = n + 1;
         }
 
         // draw_vertex_velocities(&rb1, &mut tmesh1, &mut window, &cyan);
         // draw_vertex_velocities(&rb2, &mut tmesh2, &mut window, &cyan);
-
-        // if initial_guess.is_some() {
-        //     draw_separating_plane_info(initial_guess.unwrap(), &mut tmesh1, &mut tmesh2, &mut window, &cyan);
-        // }
-
-        if contact_info.is_some() {
-            let contact_info = contact_info.unwrap();
-            window.draw_line(&na::Point3::from(contact_info.contact_p), &na::Point3::from(contact_info.contact_p + contact_info.impulse.normalize()), &cyan);
-        }
-
-        // rb1.update(&na::Vector3::new(0.0, 0.0, 0.0), &na::Vector3::new(0.0, 0.0, 0.0), dt);
-        // tmesh1.set_transform(rb1.get_transform());
-
-        // rb2.update(&force, &torque, dt);
-        // tmesh2.set_transform(rb2.get_transform());
-
-        // let sep_plane = physics::find_separating_plane(&mut tmesh1, &mut tmesh2, initial_guess);
-        // if sep_plane.is_none() {
-        //     println!("{}", rb2.x);
-        //     let e = rb2.q.euler_angles();
-        //     println!("COLLISION: {} {} {}", e.0, e.1, e.2);
-        // } else {
-        //     let sep_plane = sep_plane.unwrap().0;
-        //     initial_guess = Some(sep_plane);
-        //     draw_separating_plane_info(sep_plane, &mut tmesh1, &mut tmesh2, &mut window, &cyan);
-        // }
     }
 }

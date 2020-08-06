@@ -1,9 +1,85 @@
 use std::rc::Rc;
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use nalgebra as na;
 
 pub type Float = f32;
+
+pub struct Scene {
+    rbs: Vec<RigidBody>,
+    prev_sep_planes: HashMap<(usize, usize), SeparatingPlane>
+}
+
+impl Scene {
+    pub fn new() -> Scene {
+        Scene {
+            rbs: vec![],
+            prev_sep_planes: HashMap::new()
+        }
+    }
+
+    pub fn add_rb(&mut self, rb: RigidBody) -> usize {
+        self.rbs.push(rb);
+        return self.rbs.len() - 1;
+    }
+
+    // TODO: Can we do this without cloning?
+    pub fn update(&mut self, dt_in: Float) {
+        let mut latest_no_collision_t = 0.0;
+        let mut earliest_collision_t = dt_in;
+        let mut dt = dt_in;
+        // TODO: do we need to copy the separating planes???
+        let mut new_rbs = self.rbs.clone();
+        let mut prev_collisions: Vec<(usize, usize)> = vec![];
+        loop {
+            for rb in new_rbs.iter_mut() {
+                rb.update(&Default::default(), &Default::default(), dt);
+            }
+            let mut collisions = vec![];
+            for rb1_idx in 0..self.rbs.len() {
+                for rb2_idx in (rb1_idx + 1)..self.rbs.len() {
+                    let prev_sep_plane = self.prev_sep_planes.get(&(rb1_idx, rb2_idx)).copied();
+                    let new_sep_plane = find_separating_plane(new_rbs[rb1_idx].tmesh(), new_rbs[rb2_idx].tmesh(), prev_sep_plane);
+                    if new_sep_plane.is_some() {
+                        // TODO idk wtf I'm doing
+                        self.prev_sep_planes.insert((rb1_idx, rb2_idx), new_sep_plane.unwrap().0);
+                    } else {
+                        collisions.push((rb1_idx, rb2_idx));
+                    }
+                }
+            }
+
+            if collisions.is_empty() {
+                // Hooray - but if we were correcting a collision, let's resolve those.
+                for (rb1_idx, rb2_idx) in prev_collisions {
+                    let mut rb1 = new_rbs[rb1_idx].clone();
+                    let mut rb2 = new_rbs[rb2_idx].clone();
+                    handle_collision(&mut rb1, &mut rb2, self.prev_sep_planes[&(rb1_idx, rb2_idx)]);
+                    new_rbs[rb1_idx] = rb1;
+                    new_rbs[rb2_idx] = rb2;
+                }
+
+                // TODO: Add actual collision-time-find here
+                latest_no_collision_t = dt;
+
+                break;
+
+            } else {
+                prev_collisions = collisions;
+                new_rbs = self.rbs.clone();
+                earliest_collision_t = dt;
+                dt = (earliest_collision_t + latest_no_collision_t) * 0.5;
+            }
+        }
+
+        self.rbs = new_rbs;
+    }
+
+    pub fn get_rb(&self, idx: usize) -> &RigidBody {
+        &self.rbs[idx]
+    }
+}
 
 #[derive(Clone)]
 pub struct RigidBody {
@@ -186,7 +262,6 @@ pub struct TransformedMesh {
     transformed_vert_cache: RefCell<Vec<Option<na::Vector3<Float>>>>
 }
 
-// TODO try to follow interior mutability pattern
 impl TransformedMesh {
     pub fn new(mesh: &Rc<Mesh>, transform: Transform) -> TransformedMesh {
         TransformedMesh {
@@ -411,67 +486,13 @@ pub struct UpdateInfo {
     pub contact_info: Option<ContactInfo>
 }
 
-pub fn update<'a>(rb1_in: &mut RigidBody,
-                  rb2_in: &mut RigidBody,
-                  mut prev_sep_plane: Option<SeparatingPlane>,
-                  dt_in: Float) -> UpdateInfo {
+pub fn handle_collision(rb1_in: &mut RigidBody,
+                        rb2_in: &mut RigidBody,
+                        sep_plane: SeparatingPlane) {
+    // TODO WHY DO WE NEED THIS CLONE
     let mut rb1 = rb1_in.clone();
-    rb1.update(&na::Vector3::new(0.0, 0.0, 0.0), &na::Vector3::new(0.0, 0.0, 0.0), dt_in);
-
     let mut rb2 = rb2_in.clone();
-    rb2.update(&na::Vector3::new(0.0, 0.0, 0.0), &na::Vector3::new(0.0, 0.0, 0.0), dt_in);
-    
-    let mut new_sep_plane = find_separating_plane(rb1.tmesh(), rb2.tmesh(), prev_sep_plane);
-    
-    // TODO: Here, if we see a separating plane FIRST, we early-exit. However, the shapes might already be within the threshold
-    // of collision we look for below. Should we check for that?
-    if new_sep_plane.is_some() {
-        *rb1_in = rb1;
-        *rb2_in = rb2;
-        return UpdateInfo { sep_plane: new_sep_plane.unwrap().0, contact_info: None };
-    }
-
-    // WE FOUND A COLLISION. Let's find the time of collision!
-    let mut latest_no_collision_t = 0.0;
-    let mut earliest_collision_t = dt_in;
-    let mut dt = (earliest_collision_t + latest_no_collision_t) * 0.5;
-    let mut n = 0;
-    loop {
-        n = n + 1;
-        // QUESTION: when simulating forward from a collision-free state, should we play from t=0 or starting from that later state?
-        rb1 = rb1_in.clone();
-        rb1.update(&na::Vector3::new(0.0, 0.0, 0.0), &na::Vector3::new(0.0, 0.0, 0.0), dt);
-
-        rb2 = rb2_in.clone();
-        rb2.update(&na::Vector3::new(0.0, 0.0, 0.0), &na::Vector3::new(0.0, 0.0, 0.0), dt);
-        
-        new_sep_plane = find_separating_plane(rb1.tmesh(), rb2.tmesh(), prev_sep_plane);
-        if new_sep_plane.is_some() {
-            let (sep_plane, d) = new_sep_plane.unwrap();
-            println!("ITERATING: {}", d.abs());
-            // const TOLERANCE: f32 = 0.0001; DO NOT SUBMIT
-            const TOLERANCE: f32 = 100.0;
-            if d.abs() < TOLERANCE {
-                break;
-            }
-            
-            prev_sep_plane = Some(sep_plane);
-            latest_no_collision_t = dt;
-        } else {
-            earliest_collision_t = dt;
-        }
-        dt = (earliest_collision_t + latest_no_collision_t) * 0.5;
-    }
-
-    // println!("NUM ITERATIONS: {}", n);
-
-    // rb1_in.p = na::Vector3::new(0.0, 0.0, 0.0);
-    // rb1_in.l = na::Vector3::new(0.0, 0.0, 0.0);
-    // rb2_in.p = na::Vector3::new(0.0, 0.0, 0.0);
-    // rb2_in.l = na::Vector3::new(0.0, 0.0, 0.0);
-
     let contact_info = {
-        let sep_plane = new_sep_plane.unwrap().0;
         let (rb_to, rb_from, contact_type) = match sep_plane {
             SeparatingPlane::Mesh1Face(f, v) => {
                 println!("mesh1 face");
@@ -499,11 +520,6 @@ pub fn update<'a>(rb1_in: &mut RigidBody,
 
     *rb1_in = rb1;
     *rb2_in = rb2;
-
-    return UpdateInfo {
-        sep_plane: new_sep_plane.unwrap().0,
-        contact_info: Some(contact_info)
-    };
 }
 
 enum ContactType {
