@@ -32,13 +32,23 @@ impl Scene {
         // TODO: do we need to copy the separating planes???
         let mut new_rbs = self.rbs.clone();
         let mut prev_collisions: Vec<(usize, usize)> = vec![];
+        let gravity = na::Vector3::new(0.0, -9.81, 0.0);
         loop {
             for rb in new_rbs.iter_mut() {
-                rb.update(&Default::default(), &Default::default(), dt);
+                rb.update(&gravity, &Default::default(), dt);
             }
             let mut collisions = vec![];
             for rb1_idx in 0..self.rbs.len() {
                 for rb2_idx in (rb1_idx + 1)..self.rbs.len() {
+                    // TODO: This AABB pre-check causes us to not find sep planes when we need them in the hashmap
+                    //
+                    // TODO: need to use the max of the rb scale components because these scales are in body frame!!!
+                    // let scale1 = new_rbs[rb1_idx].scale * ((2.0 as Float).sqrt() + 0.01);
+                    // let scale2 = new_rbs[rb2_idx].scale * ((2.0 as Float).sqrt() + 0.01);
+                    // if !aabb_overlap(&new_rbs[rb1_idx].x(), &scale1, &new_rbs[rb2_idx].x(), &scale2) {
+                    //     continue;
+                    // }
+
                     let prev_sep_plane = self.prev_sep_planes.get(&(rb1_idx, rb2_idx)).copied();
                     let new_sep_plane = find_separating_plane(new_rbs[rb1_idx].tmesh(), new_rbs[rb2_idx].tmesh(), prev_sep_plane);
                     if new_sep_plane.is_some() {
@@ -81,6 +91,16 @@ impl Scene {
     }
 }
 
+fn aabb_overlap(p1: &na::Vector3<f32>, scale1: &na::Vector3<f32>, p2: &na::Vector3<f32>, scale2: &na::Vector3<f32>) -> bool {
+    for coord in 0..3 {
+        if p1[coord] - 0.5*scale1[coord] > p2[coord] + 0.5*scale2[coord] ||
+           p1[coord] + 0.5*scale1[coord] < p2[coord] - 0.5*scale2[coord] {
+            return false;
+        }
+    }
+    return true;
+}
+
 #[derive(Clone)]
 pub struct RigidBody {
     x: na::Vector3<Float>,  // position
@@ -92,14 +112,33 @@ pub struct RigidBody {
     pub name: String,
     tmesh: TransformedMesh,
     // TODO FIGURE OUT HOW TO REMOVE THIS
-    pub scale: na::Vector3<Float> // dimensions (assuming it's a box)
+    pub scale: na::Vector3<Float>, // dimensions (assuming it's a box)
 }
 
 impl RigidBody {
     pub fn new_box(m: Float, name: &str, x_dim: Float, y_dim: Float, z_dim: Float, mesh: &Rc<Mesh>) -> RigidBody {
+        let transform = Transform {
+            p: Default::default(),
+            rot: na::Matrix3::identity(),
+            scale: na::Vector3::new(x_dim, y_dim, z_dim)
+        };
         let x2 = x_dim*x_dim;
         let y2 = y_dim*y_dim;
         let z2 = z_dim*z_dim;
+        RigidBody {
+            x: Default::default(),
+            q: Default::default(),
+            p: Default::default(),
+            l: Default::default(),
+            m_inv: 1.0 / m,
+            i_body_inv: na::Matrix3::from_diagonal(&((12.0 / m) * na::Vector3::new(1.0 / (y2 + z2), 1.0 / (x2 + z2), 1.0 / (x2 + y2)))),
+            name: String::from(name),
+            tmesh: TransformedMesh::new(&Rc::clone(mesh), transform),
+            scale: na::Vector3::new(x_dim, y_dim, z_dim),
+        }
+    }
+
+    pub fn new_static_box(name: &str, x_dim: Float, y_dim: Float, z_dim: Float, mesh: &Rc<Mesh>) -> RigidBody {
         let transform = Transform {
             p: Default::default(),
             rot: na::Matrix3::identity(),
@@ -110,8 +149,8 @@ impl RigidBody {
             q: Default::default(),
             p: Default::default(),
             l: Default::default(),
-            m_inv: 1.0 / m,
-            i_body_inv: na::Matrix3::from_diagonal(&((12.0 / m) * na::Vector3::new(1.0 / (y2 + z2), 1.0 / (x2 + z2), 1.0 / (x2 + y2)))),
+            m_inv: 0.0,
+            i_body_inv: na::Matrix3::zeros(),
             name: String::from(name),
             tmesh: TransformedMesh::new(&Rc::clone(mesh), transform),
             scale: na::Vector3::new(x_dim, y_dim, z_dim),
@@ -153,6 +192,9 @@ impl RigidBody {
     }
 
     pub fn update(&mut self, force: &na::Vector3<Float>, torque: &na::Vector3<Float>, dt: Float) {
+        if self.m_inv == 0.0 {
+            return;
+        }
         let v = self.get_velocity();
         let w = self.get_angular_velocity();
 
@@ -495,15 +537,15 @@ pub fn handle_collision(rb1_in: &mut RigidBody,
     let contact_info = {
         let (rb_to, rb_from, contact_type) = match sep_plane {
             SeparatingPlane::Mesh1Face(f, v) => {
-                println!("mesh1 face");
+                // println!("mesh1 face");
                 (&mut rb2, &mut rb1, ContactType::VertexFace(v, f))
             },
             SeparatingPlane::Mesh2Face(f, v) => {
-                println!("mesh2 face");
+                // println!("mesh2 face");
                 (&mut rb1, &mut rb2, ContactType::VertexFace(v, f))
             },
             SeparatingPlane::Edges(e1, e2) => {
-                println!("edges");
+                // println!("edges");
                 (&mut rb1, &mut rb2, ContactType::EdgeEdge(e1, e2))
             }
         };
@@ -536,6 +578,7 @@ struct Contact<'a> {
 
 fn make_contact<'a, 'b>(contact_type: ContactType,
                         rb_to: &'a mut RigidBody, rb_from: &'a mut RigidBody) -> Contact<'a> {
+    // TODO: Maybe make sure that the plane_n's are not degenerate before normalizing.
     let (position, normal) = match contact_type {
         ContactType::VertexFace(to_v, from_f) => {
             let u = rb_from.tmesh().get_vertex(from_f[1]) - rb_from.tmesh().get_vertex(from_f[0]);
@@ -563,9 +606,10 @@ fn make_contact<'a, 'b>(contact_type: ContactType,
 
 fn apply_impulses_from_contact<'a>(c: &mut Contact<'a>) -> na::Vector3<Float> {
     const COEFFICIENT_OF_RESTITUTION: Float = 0.5;
+    const COEFFICIENT_OF_FRICTION: Float = 0.2;
     let v_to = c.rb_to.get_point_velocity(&c.position);
     let v_from = c.rb_from.get_point_velocity(&c.position);
-    let v_rel = c.normal.dot(&(v_to - v_from));
+    let v_rel = v_to - v_from;
 
     let I_inv_to = c.rb_to.get_inv_inertia_tensor();
     let I_inv_from = c.rb_from.get_inv_inertia_tensor();
@@ -573,14 +617,38 @@ fn apply_impulses_from_contact<'a>(c: &mut Contact<'a>) -> na::Vector3<Float> {
     let r_to = c.position - c.rb_to.x;
     let r_from = c.position - c.rb_from.x;
 
+    // normal component
+    let v_rel_n = c.normal.dot(&(v_to - v_from));
     let to_term = (I_inv_to * (r_to.cross(&c.normal))).cross(&r_to);
     let from_term = (I_inv_from * (r_from.cross(&c.normal))).cross(&r_from);
     let denom = c.rb_to.m_inv + c.rb_from.m_inv + c.normal.dot(&to_term) + c.normal.dot(&from_term);
-    let j = -(1.0 + COEFFICIENT_OF_RESTITUTION) * v_rel / denom;
-    let impulse = j * c.normal;
+    let j_normal = -(1.0 + COEFFICIENT_OF_RESTITUTION) * v_rel_n / denom;
+    let normal_impulse = j_normal * c.normal;
 
-    println!("impulse: {}", impulse);
-    println!("from {}, to {}", c.rb_from.name, c.rb_to.name);
+    // frictional component
+    let tangent = c.normal.cross(&v_rel).cross(&c.normal);
+    let mut fric_impulse;
+    // TODO come up with a better value for this I guess.
+    if tangent.norm_squared() > 0.0001 * 0.0001 {
+        let tangent = tangent.normalize();
+        let to_term = (I_inv_to * (r_to.cross(&tangent))).cross(&r_to);
+        let from_term = (I_inv_from * (r_from.cross(&tangent))).cross(&r_from);
+        let denom = c.rb_to.m_inv + c.rb_from.m_inv + tangent.dot(&to_term) + tangent.dot(&from_term);
+        let j_fric = (-1.0 + COEFFICIENT_OF_RESTITUTION) * v_rel.dot(&tangent) / denom;
+        let j_fric = j_fric.max(-COEFFICIENT_OF_FRICTION*j_normal).min(COEFFICIENT_OF_FRICTION*j_normal);
+        fric_impulse = j_fric * tangent;
+    } else {
+        fric_impulse = na::Vector3::zeros();
+    }
+
+    let impulse = normal_impulse + fric_impulse;
+
+    // if c.rb_to.m_inv > 0.0 {
+    //     println!("{} {} {} {}", normal_impulse.norm(), fric_impulse.norm(), c.rb_to.p.norm(), c.rb_to.l.norm());
+    // }
+    // if c.rb_from.m_inv > 0.0 {
+    //     println!("{} {} {} {}", normal_impulse.norm(), fric_impulse.norm(), c.rb_from.p.norm(), c.rb_from.l.norm());
+    // }
 
     c.rb_to.p += impulse;
     c.rb_from.p -= impulse;

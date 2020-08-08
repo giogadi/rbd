@@ -1,11 +1,14 @@
 use std::rc::Rc;
+use rand::distributions::Uniform;
+use std::iter::Iterator;
 
-use kiss3d;
 use nalgebra as na;
 
+use kiss3d;
 use kiss3d::window::Window;
 use kiss3d::event::{Action, WindowEvent};
 use kiss3d::light::Light;
+use kiss3d::scene::SceneNode;
 
 use physics;
 
@@ -93,6 +96,112 @@ fn draw_vertex_velocities(rb: &physics::RigidBody, tmesh: &physics::TransformedM
     }
 }
 
+fn make_room(dim: f32, mesh: &Rc<physics::Mesh>, physics_scene: &mut physics::Scene, window: &mut Window, only_render_floor: bool) {
+    for &offset in &[-0.5*dim - 0.5, 0.5*dim + 0.5] {
+        for coord in 0..3 {
+            let mut scale = na::Vector3::new(dim, dim, dim);
+            scale[coord] = 1.0;
+            let mut rb = physics::RigidBody::new_static_box("wall", scale[0], scale[1], scale[2], mesh);
+            let mut p = na::Vector3::<f32>::zeros();
+            p[coord] = offset;
+            rb.set_pose(&p, &Default::default());
+            if !only_render_floor || (coord == 1 && offset < 0.0) {
+                let mut c = window.add_cube(scale[0], scale[1], scale[2]);
+                c.data_mut().set_local_rotation(rb.q());
+                c.data_mut().set_local_translation(na::Translation3::from(rb.x()));
+                c.set_color(0.8, 0.8, 0.8);
+            }
+            physics_scene.add_rb(rb);
+        }
+    }
+}
+
+fn aabb_overlap(p1: &na::Vector3<f32>, scale1: &na::Vector3<f32>, p2: &na::Vector3<f32>, scale2: &na::Vector3<f32>) -> bool {
+    for coord in 0..3 {
+        if p1[coord] - 0.5*scale1[coord] > p2[coord] + 0.5*scale2[coord] ||
+           p1[coord] + 0.5*scale1[coord] < p2[coord] - 0.5*scale2[coord] {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn make_random_boxes(n: usize, room_dim: f32, box_dim: f32, mesh: &Rc<physics::Mesh>, physics_scene: &mut physics::Scene, window: &mut Window) -> Vec<(usize, SceneNode)> {
+    let bounding_dim = box_dim * 2.0f32.sqrt() + 0.1;
+    let rng_dist = Uniform::new(-0.5*room_dim + 0.5*bounding_dim, 0.5*room_dim - 0.5*bounding_dim);
+    let mut rng = rand::thread_rng();
+    let mut bounding_boxes = vec![];
+    let scale = na::Vector3::<f32>::new(bounding_dim, bounding_dim, bounding_dim);
+    for _ in 0..n {
+        let mut p;
+        loop {
+            p = na::Vector3::from_distribution(&rng_dist, &mut rng);
+            if bounding_boxes.iter().all(|rhs| !aabb_overlap(&p, &scale, rhs, &scale)) {
+                break;
+            }
+        }
+        bounding_boxes.push(p);
+    }
+    let mut boxes = vec![];
+    let color_dist = Uniform::new(0.0, 1.0);
+    let angle_dist = Uniform::new(0.0, 2.0*std::f32::consts::PI);
+    for b in bounding_boxes {
+        let mut rb = physics::RigidBody::new_box(1.0, "blah", box_dim, box_dim, box_dim, mesh);
+        let rand_angles = na::Vector3::from_distribution(&angle_dist, &mut rng);
+        let q = na::UnitQuaternion::<f32>::from_euler_angles(rand_angles[0], rand_angles[1], rand_angles[2]);
+        rb.set_pose(&b, &q);
+        let mut c = window.add_cube(box_dim, box_dim, box_dim);
+        c.data_mut().set_local_rotation(rb.q());
+        c.data_mut().set_local_translation(na::Translation3::from(rb.x()));
+        let rand_color = na::Vector3::from_distribution(&color_dist, &mut rng);
+        c.set_color(rand_color[0], rand_color[1], rand_color[2]);
+        boxes.push((physics_scene.add_rb(rb), c));
+    }
+    return boxes;
+}
+
+fn make_boxes(mesh: &Rc<physics::Mesh>, physics_scene: &mut physics::Scene, window: &mut Window) -> Vec<(usize, SceneNode)> {
+    let scale = [1.0, 1.0, 1.0];
+    let mut rb1 = physics::RigidBody::new_box(1.0, "red", scale[0], scale[1], scale[2], &mesh);
+    let x: na::Vector3<f32> = Default::default();
+    let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, na::RealField::frac_pi_4(), 0.0));
+    rb1.set_pose(&x, &q);
+    // rb1.l = na::Vector3::new(0.0, 0.0, 0.25);
+    let rb1 = physics_scene.add_rb(rb1);
+    let mut c1      = window.add_cube(scale[0], scale[1], scale[2]);
+    c1.data_mut().set_local_rotation(physics_scene.get_rb(rb1).q());
+    c1.data_mut().set_local_translation(na::Translation3::from(physics_scene.get_rb(rb1).x()));
+    c1.set_color(1.0, 0.0, 0.0);
+
+    let mut rb2 = physics::RigidBody::new_box(1.0, "green", scale[0], scale[1], scale[2], &mesh);
+    let x = na::Vector3::new(-2.5, 0.0, 0.0);
+    let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, na::RealField::frac_pi_4(), na::RealField::frac_pi_4()));
+    // let q = na::UnitQuaternion::from_euler_angles(0.7938401, -1.3559403, -2.985731);
+    rb2.set_pose(&x, &q);
+    rb2.p = na::Vector3::new(5.0, 0.0, 0.0);
+    // rb2.l = na::Vector3::new(0.0, 0.5, 0.0);
+    let rb2 = physics_scene.add_rb(rb2);
+    let mut c2      = window.add_cube(scale[0], scale[1], scale[2]);
+    c2.data_mut().set_local_rotation(physics_scene.get_rb(rb2).q());
+    c2.data_mut().set_local_translation(na::Translation3::from(physics_scene.get_rb(rb2).x()));
+    c2.set_color(0.0, 1.0, 0.0);
+
+    let mut rb3 = physics::RigidBody::new_box(1.0, "blue", scale[0], scale[1], scale[2], &mesh);
+    let x = na::Vector3::new(2.0, 0.0, 0.0);
+    let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, na::RealField::frac_pi_4(), na::RealField::frac_pi_4()));
+    // let q = na::UnitQuaternion::from_euler_angles(0.7938401, -1.3559403, -2.985731);
+    rb3.set_pose(&x, &q);
+    // rb3.p = na::Vector3::new(0.5, 0.0, 0.0);
+    // rb2.l = na::Vector3::new(0.0, 0.5, 0.0);
+    let rb3 = physics_scene.add_rb(rb3);
+    let mut c3      = window.add_cube(scale[0], scale[1], scale[2]);
+    c3.data_mut().set_local_rotation(physics_scene.get_rb(rb3).q());
+    c3.data_mut().set_local_translation(na::Translation3::from(physics_scene.get_rb(rb3).x()));
+    c3.set_color(0.0, 0.0, 1.0);
+
+    return vec![(rb1, c1), (rb2, c2), (rb3, c3)];
+}
+
 fn main() {
     let mut window = Window::new("Kiss3d: cube");
     let eye = na::Point3::new(10.0f32, 10.0, 10.0);
@@ -104,31 +213,12 @@ fn main() {
     let mut ps = physics::Scene::new();
 
     let box_mesh = Rc::new(physics::unit_box_mesh());
-    
-    let scale = [1.0, 1.0, 1.0];
-    let mut rb1 = physics::RigidBody::new_box(1.0, "red", scale[0], scale[1], scale[2], &box_mesh);
-    let x: na::Vector3<f32> = Default::default();
-    let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, na::RealField::frac_pi_4(), 0.0));
-    rb1.set_pose(&x, &q);
-    // rb1.l = na::Vector3::new(0.0, 0.0, 0.25);
-    let rb1 = ps.add_rb(rb1);
-    let mut c1      = window.add_cube(scale[0], scale[1], scale[2]);
-    c1.data_mut().set_local_rotation(ps.get_rb(rb1).q());
-    c1.data_mut().set_local_translation(na::Translation3::from(ps.get_rb(rb1).x()));
-    c1.set_color(1.0, 0.0, 0.0);
 
-    let mut rb2 = physics::RigidBody::new_box(1.0, "green", scale[0], scale[1], scale[2], &box_mesh);
-    let x = na::Vector3::new(-2.5, 0.0, 0.0);
-    let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, na::RealField::frac_pi_4(), na::RealField::frac_pi_4()));
-    // let q = na::UnitQuaternion::from_euler_angles(0.7938401, -1.3559403, -2.985731);
-    rb2.set_pose(&x, &q);
-    rb2.p = na::Vector3::new(0.5, 0.0, 0.0);
-    // rb2.l = na::Vector3::new(0.0, 0.5, 0.0);
-    let rb2 = ps.add_rb(rb2);
-    let mut c2      = window.add_cube(scale[0], scale[1], scale[2]);
-    c2.data_mut().set_local_rotation(ps.get_rb(rb2).q());
-    c2.data_mut().set_local_translation(na::Translation3::from(ps.get_rb(rb2).x()));
-    c2.set_color(0.0, 1.0, 0.0);
+    const ROOM_SIZE: f32 = 10.0;
+
+    make_room(ROOM_SIZE, &box_mesh, &mut ps, &mut window, true);
+
+    let mut boxes = make_random_boxes(5, ROOM_SIZE, 1.0, &box_mesh, &mut ps, &mut window);
     
     let fps: u64 = 60; 
     let dt: physics::Float = 1.0 / (fps as physics::Float);
@@ -162,22 +252,16 @@ fn main() {
             }
         }
 
-        c1.data_mut().set_local_rotation(ps.get_rb(rb1).q());
-        c1.data_mut().set_local_translation(na::Translation3::<f32>::from(ps.get_rb(rb1).x()));
-
-        c2.data_mut().set_local_rotation(ps.get_rb(rb2).q());
-        c2.data_mut().set_local_translation(na::Translation3::<f32>::from(ps.get_rb(rb2).x()));
-
-        // let force = na::Vector3::new(0.05, 0.0, 0.0);
-        let force = na::Vector3::new(0.0, 0.0, 0.0);
-        // let torque = na::Vector3::new(0.0, 0.07, 0.0);
-        let torque = na::Vector3::new(0.0, 0.0, 0.0);
-
         if !paused || do_step {            
             ps.update(dt);
             do_step = false;
             // println!("ITERATION {}", n);
             n = n + 1;
+        }
+
+        for b in boxes.iter_mut() {
+            b.1.data_mut().set_local_rotation(ps.get_rb(b.0).q());
+            b.1.data_mut().set_local_translation(na::Translation3::<f32>::from(ps.get_rb(b.0).x()));
         }
 
         // draw_vertex_velocities(&rb1, &mut tmesh1, &mut window, &cyan);
