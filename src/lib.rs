@@ -35,7 +35,9 @@ impl Scene {
         let gravity = na::Vector3::new(0.0, -9.81, 0.0);
         loop {
             for rb in new_rbs.iter_mut() {
-                rb.update(&gravity, &Default::default(), dt);
+                if rb.active {
+                    rb.update(&gravity, &Default::default(), dt);
+                }
             }
             let mut collisions = vec![];
             for rb1_idx in 0..self.rbs.len() {
@@ -82,8 +84,13 @@ impl Scene {
                 dt = (earliest_collision_t + latest_no_collision_t) * 0.5;
             }
         }
+        // println!("dt: {}", dt);
 
         self.rbs = new_rbs;
+    }
+
+    pub fn get_num_rbs(&self) -> usize {
+        return self.rbs.len();
     }
 
     pub fn get_rb(&self, idx: usize) -> &RigidBody {
@@ -113,6 +120,7 @@ pub struct RigidBody {
     tmesh: TransformedMesh,
     // TODO FIGURE OUT HOW TO REMOVE THIS
     pub scale: na::Vector3<Float>, // dimensions (assuming it's a box)
+    pub active: bool
 }
 
 impl RigidBody {
@@ -135,6 +143,7 @@ impl RigidBody {
             name: String::from(name),
             tmesh: TransformedMesh::new(&Rc::clone(mesh), transform),
             scale: na::Vector3::new(x_dim, y_dim, z_dim),
+            active: true
         }
     }
 
@@ -154,6 +163,7 @@ impl RigidBody {
             name: String::from(name),
             tmesh: TransformedMesh::new(&Rc::clone(mesh), transform),
             scale: na::Vector3::new(x_dim, y_dim, z_dim),
+            active: true
         }
     }
 
@@ -552,6 +562,22 @@ pub fn handle_collision(rb1_in: &mut RigidBody,
         let mut contact = make_contact(contact_type, rb_to, rb_from);
 
         let impulse = apply_impulses_from_contact(&mut contact);
+
+        let eps2 = 0.1 * 0.1;
+        if impulse.norm_squared() < eps2 &&
+               contact.rb_to.p.norm_squared() < eps2 &&
+               contact.rb_to.l.norm_squared() < eps2 {
+                contact.rb_to.active = false;
+        } else {
+            contact.rb_to.active = true;
+        }
+        if impulse.norm_squared() < eps2 &&
+               contact.rb_from.p.norm_squared() < eps2 &&
+               contact.rb_from.l.norm_squared() < eps2 {
+                contact.rb_from.active = false;
+        } else {
+            contact.rb_from.active = true;
+        }
 
         ContactInfo {
             contact_p: contact.position,

@@ -1,6 +1,9 @@
 use std::rc::Rc;
 use rand::distributions::Uniform;
 use std::iter::Iterator;
+use std::fs::File;
+use rand::SeedableRng;
+use std::io::Write;
 
 use nalgebra as na;
 
@@ -9,6 +12,7 @@ use kiss3d::window::Window;
 use kiss3d::event::{Action, WindowEvent};
 use kiss3d::light::Light;
 use kiss3d::scene::SceneNode;
+use kiss3d::camera::Camera;
 
 use physics;
 
@@ -127,9 +131,9 @@ fn aabb_overlap(p1: &na::Vector3<f32>, scale1: &na::Vector3<f32>, p2: &na::Vecto
 }
 
 fn make_random_boxes(n: usize, room_dim: f32, box_dim: f32, mesh: &Rc<physics::Mesh>, physics_scene: &mut physics::Scene, window: &mut Window) -> Vec<(usize, SceneNode)> {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(2);
     let bounding_dim = box_dim * 2.0f32.sqrt() + 0.1;
     let rng_dist = Uniform::new(-0.5*room_dim + 0.5*bounding_dim, 0.5*room_dim - 0.5*bounding_dim);
-    let mut rng = rand::thread_rng();
     let mut bounding_boxes = vec![];
     let scale = na::Vector3::<f32>::new(bounding_dim, bounding_dim, bounding_dim);
     for _ in 0..n {
@@ -145,8 +149,8 @@ fn make_random_boxes(n: usize, room_dim: f32, box_dim: f32, mesh: &Rc<physics::M
     let mut boxes = vec![];
     let color_dist = Uniform::new(0.0, 1.0);
     let angle_dist = Uniform::new(0.0, 2.0*std::f32::consts::PI);
-    for b in bounding_boxes {
-        let mut rb = physics::RigidBody::new_box(1.0, "blah", box_dim, box_dim, box_dim, mesh);
+    for (i, b) in bounding_boxes.iter().enumerate() {
+        let mut rb = physics::RigidBody::new_box(1.0, &format!("box{}", i), box_dim, box_dim, box_dim, mesh);
         let rand_angles = na::Vector3::from_distribution(&angle_dist, &mut rng);
         let q = na::UnitQuaternion::<f32>::from_euler_angles(rand_angles[0], rand_angles[1], rand_angles[2]);
         rb.set_pose(&b, &q);
@@ -202,8 +206,24 @@ fn make_boxes(mesh: &Rc<physics::Mesh>, physics_scene: &mut physics::Scene, wind
     return vec![(rb1, c1), (rb2, c2), (rb3, c3)];
 }
 
+fn dump_state(physics_scene: &physics::Scene) {
+    let mut f = File::create("dump.txt").unwrap();
+    for i in 0..physics_scene.get_num_rbs() {
+        let rb = physics_scene.get_rb(i);
+        f.write_all(format!("============ {} ===========\n", rb.name).as_bytes()).unwrap();
+        f.write_all(format!("x: {}", rb.x()).as_bytes()).unwrap();
+        let eulers = rb.q().euler_angles();
+        let eulers = na::Vector3::<f32>::new(eulers.0, eulers.1, eulers.2);
+        f.write_all(format!("q: {}", eulers).as_bytes()).unwrap();
+        f.write_all(format!("p: {}", rb.p).as_bytes()).unwrap();
+        f.write_all(format!("l: {}", rb.l).as_bytes()).unwrap();
+        f.write_all(format!("active: {}\n", rb.active).as_bytes()).unwrap();
+    }
+}
+
 fn main() {
     let mut window = Window::new("Kiss3d: cube");
+    println!("window size: {} {}", window.width(), window.height());
     let eye = na::Point3::new(10.0f32, 10.0, 10.0);
     let at = na::Point3::origin();
     let mut camera = kiss3d::camera::ArcBall::new(eye, at);
@@ -218,7 +238,7 @@ fn main() {
 
     make_room(ROOM_SIZE, &box_mesh, &mut ps, &mut window, true);
 
-    let mut boxes = make_random_boxes(5, ROOM_SIZE, 1.0, &box_mesh, &mut ps, &mut window);
+    let mut boxes = make_random_boxes(7, ROOM_SIZE, 1.0, &box_mesh, &mut ps, &mut window);
     
     let fps: u64 = 60; 
     let dt: physics::Float = 1.0 / (fps as physics::Float);
@@ -233,6 +253,7 @@ fn main() {
     let mut paused = true;
     let mut do_step = false;
     let mut n = 1;
+    let mut show_names = false;
     while window.render_with_camera(&mut camera) {
         for mut event in window.events().iter() {
             match event.value {
@@ -244,11 +265,28 @@ fn main() {
                         do_step = true;
                     }
                 },
+                WindowEvent::Key(kiss3d::event::Key::D, Action::Press, _) => {
+                    dump_state(&ps);
+                },
+                WindowEvent::Key(kiss3d::event::Key::N, Action::Press, _) => {
+                    show_names = !show_names;
+                }
                 WindowEvent::Scroll(xshift, yshift, _) => {
                     event.inhibited = true;
                     camera.set_dist(camera.dist() + 0.1 * (yshift as f32));
                 }
                 _ => {}
+            }
+        }
+
+        if show_names {
+            for i in 0..ps.get_num_rbs() {
+                let x = ps.get_rb(i).x();
+                // project gives values from (0,0) to (size.0, size.1), but with bottom-left corner being 0,0. However,
+                // draw_text for some reason says the window has extends of 2*size and 0,0 is in the top-left corner.
+                let mut x2d = camera.project(&na::Point3::from(x), &na::Vector2::new(2.0 * window.width() as f32, 2.0 * window.height() as f32));
+                x2d.y = 2.0 * (window.height() as f32) - x2d.y;
+                window.draw_text(&ps.get_rb(i).name, &na::Point2::from(x2d), 50.0, &kiss3d::text::Font::default(), &na::Point3::new(1.0, 1.0, 1.0));
             }
         }
 
