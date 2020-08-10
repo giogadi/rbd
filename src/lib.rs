@@ -1,21 +1,30 @@
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt;
 
 use nalgebra as na;
 
 pub type Float = f32;
 
+pub enum IntegrationScheme {
+    ExplicitEuler, SemiImplicitEuler
+}
+
 pub struct Scene {
     rbs: Vec<RigidBody>,
-    prev_sep_planes: HashMap<(usize, usize), SeparatingPlane>
+    prev_sep_planes: HashMap<(usize, usize), SeparatingPlane>,
+    pub enable_gravity: bool,
+    pub integration_scheme: IntegrationScheme
 }
 
 impl Scene {
     pub fn new() -> Scene {
         Scene {
             rbs: vec![],
-            prev_sep_planes: HashMap::new()
+            prev_sep_planes: HashMap::new(),
+            enable_gravity: true,
+            integration_scheme: IntegrationScheme::SemiImplicitEuler
         }
     }
 
@@ -25,23 +34,43 @@ impl Scene {
     }
 
     // TODO: Can we do this without cloning?
-    pub fn update(&mut self, dt_in: Float) {
+    pub fn update(&mut self, dt_in: Float) -> (Float, Vec<ContactInfo>) {
         let mut latest_no_collision_t = 0.0;
         let mut earliest_collision_t = dt_in;
         let mut dt = dt_in;
         // TODO: do we need to copy the separating planes???
         let mut new_rbs = self.rbs.clone();
         let mut prev_collisions: Vec<(usize, usize)> = vec![];
-        let gravity = na::Vector3::new(0.0, -9.81, 0.0);
+        // TODO this gravity is FAKE! It assumes the RB has a mass of 1.0.
+        let gravity;
+        if self.enable_gravity {
+            gravity = na::Vector3::new(0.0, -9.81, 0.0);
+        } else {
+            gravity = na::Vector3::new(0.0, 0.0, 0.0);
+        }
+        let mut contact_infos = vec![];
         loop {
+            // DEBUG DO NOT SUBMIT.
+            self.prev_sep_planes.clear();
+            for rb1_idx in 0..new_rbs.len() {
+                for rb2_idx in (rb1_idx + 1)..new_rbs.len() {
+                    let new_sep_plane = find_separating_plane(new_rbs[rb1_idx].tmesh(), new_rbs[rb2_idx].tmesh(), None);
+                    self.prev_sep_planes.insert((rb1_idx, rb2_idx), new_sep_plane.unwrap().0);
+                }
+            }
+
             for rb in new_rbs.iter_mut() {
                 if rb.active {
-                    rb.update(&gravity, &Default::default(), dt);
+                    let gravity = if rb.m_inv > 0.0 { gravity / rb.m_inv } else { na::Vector3::zeros() };
+                    match self.integration_scheme {
+                        IntegrationScheme::ExplicitEuler => rb.explicit_euler_update(&gravity, &Default::default(), dt),
+                        IntegrationScheme::SemiImplicitEuler => rb.semi_implicit_euler_update(&gravity, &Default::default(), dt)
+                    }
                 }
             }
             let mut collisions = vec![];
-            for rb1_idx in 0..self.rbs.len() {
-                for rb2_idx in (rb1_idx + 1)..self.rbs.len() {
+            for rb1_idx in 0..new_rbs.len() {
+                for rb2_idx in (rb1_idx + 1)..new_rbs.len() {
                     // TODO: This AABB pre-check causes us to not find sep planes when we need them in the hashmap
                     //
                     // TODO: need to use the max of the rb scale components because these scales are in body frame!!!
@@ -67,7 +96,7 @@ impl Scene {
                 for (rb1_idx, rb2_idx) in prev_collisions {
                     let mut rb1 = new_rbs[rb1_idx].clone();
                     let mut rb2 = new_rbs[rb2_idx].clone();
-                    handle_collision(&mut rb1, &mut rb2, self.prev_sep_planes[&(rb1_idx, rb2_idx)]);
+                    contact_infos.push(handle_collision(&mut rb1, &mut rb2, self.prev_sep_planes[&(rb1_idx, rb2_idx)]));
                     new_rbs[rb1_idx] = rb1;
                     new_rbs[rb2_idx] = rb2;
                 }
@@ -82,11 +111,13 @@ impl Scene {
                 new_rbs = self.rbs.clone();
                 earliest_collision_t = dt;
                 dt = (earliest_collision_t + latest_no_collision_t) * 0.5;
+                contact_infos.clear();
             }
         }
         // println!("dt: {}", dt);
 
         self.rbs = new_rbs;
+        return (dt, contact_infos);
     }
 
     pub fn get_num_rbs(&self) -> usize {
@@ -95,6 +126,13 @@ impl Scene {
 
     pub fn get_rb(&self, idx: usize) -> &RigidBody {
         &self.rbs[idx]
+    }
+
+    // FOR DEBUGGING
+    pub fn activate_all(&mut self) {
+        for rb in self.rbs.iter_mut() {
+            rb.active = true;
+        }
     }
 }
 
@@ -108,7 +146,7 @@ fn aabb_overlap(p1: &na::Vector3<f32>, scale1: &na::Vector3<f32>, p2: &na::Vecto
     return true;
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RigidBody {
     x: na::Vector3<Float>,  // position
     q: na::UnitQuaternion<Float>,  // rotation
@@ -201,7 +239,32 @@ impl RigidBody {
         return rot * self.i_body_inv * rot.transpose();
     }
 
-    pub fn update(&mut self, force: &na::Vector3<Float>, torque: &na::Vector3<Float>, dt: Float) {
+    pub fn semi_implicit_euler_update(&mut self, force: &na::Vector3<Float>, torque: &na::Vector3<Float>, dt: Float) {
+        if self.m_inv == 0.0 {
+            return;
+        }
+        let dp = force;
+        self.p += dt * dp;
+
+        let dl = torque;
+        self.l += dt * dl;
+
+        let v = self.get_velocity();
+        self.x += dt * v;
+
+        let w = self.get_angular_velocity();
+        let w_as_q = na::Quaternion::new(0.0, w[0], w[1], w[2]);
+        let dq = 0.5 * w_as_q * self.q.quaternion();
+        self.q = na::UnitQuaternion::from_quaternion(self.q.quaternion() + dt * dq);
+
+        self.tmesh.set_transform(Transform {
+            p: self.x,
+            rot: self.q.to_rotation_matrix().matrix().clone(),
+            scale: self.scale
+        });
+    }
+
+    pub fn explicit_euler_update(&mut self, force: &na::Vector3<Float>, torque: &na::Vector3<Float>, dt: Float) {
         if self.m_inv == 0.0 {
             return;
         }
@@ -314,6 +377,12 @@ pub struct TransformedMesh {
     transformed_vert_cache: RefCell<Vec<Option<na::Vector3<Float>>>>
 }
 
+impl fmt::Debug for TransformedMesh {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        return f.debug_struct("TMesh").finish();
+    }
+}
+
 impl TransformedMesh {
     pub fn new(mesh: &Rc<Mesh>, transform: Transform) -> TransformedMesh {
         TransformedMesh {
@@ -353,6 +422,7 @@ fn does_face_plane_separate_meshes<'a>(mesh1: &TransformedMesh, face_on_mesh1: &
     for v_idx in 0..mesh2.mesh.vertices.len() {
         let d = signed_dist_from_plane(&mesh2.get_vertex(v_idx), &plane_p, &plane_n);
         if d < 0.0 {
+            // println!("FACE-VERTEX: {}", v_idx);
             return None;
         }
         if d < min_dist {
@@ -393,6 +463,9 @@ fn does_edge_plane_separate_meshes<'a>(mesh1: &TransformedMesh, edge_on_mesh1: (
         let d = signed_dist_from_plane(&mesh2.get_vertex(v_idx), &plane_p, &plane_n);
         let side = d >= 0.0;
         if side != mesh2_side {
+            // TODO: This debug msg is not totally helpful: this might not actually be the colliding vertex.
+            // let x = mesh2.get_vertex(v_idx);
+            // println!("EDGE-EDGE (rb2 vertex {} {} {} {})", v_idx, x[0], x[1], x[2]);
             return None;
         }
         min_dist = min_dist.min(d.abs());
@@ -405,6 +478,9 @@ fn does_edge_plane_separate_meshes<'a>(mesh1: &TransformedMesh, edge_on_mesh1: (
         let d = signed_dist_from_plane(&mesh1.get_vertex(v_idx), &plane_p, &plane_n);
         let side = d >= 0.0;
         if side == mesh2_side {
+            // TODO: This debug msg is not totally helpful: this might not actually be the colliding vertex.
+            // let x = mesh1.get_vertex(v_idx);
+            // println!("EDGE-EDGE (rb1 vertex {} {} {} {})", v_idx, x[0], x[1], x[2]);
             return None;
         }
     }
@@ -420,6 +496,7 @@ pub enum SeparatingPlane {
     Edges((usize, usize), (usize, usize))
 }
 
+// TODO: optimize the edge-edge stuff using techniques from Dirk Gregorius's GDC talk.
 pub fn find_separating_plane<'a>(mesh1: &TransformedMesh, mesh2: &TransformedMesh,
                                  initial_guess: Option<SeparatingPlane>) -> Option<(SeparatingPlane, Float)> {
     if initial_guess.is_some() {
@@ -525,14 +602,18 @@ pub fn closest_point_on_plane_to_point(p: &na::Vector3<Float>, plane_p: &na::Vec
     p - (p - plane_p).dot(plane_n) * plane_n
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Debug)]
 pub struct ContactInfo {
     pub contact_p: na::Vector3<Float>,
     pub contact_n: na::Vector3<Float>,
-    pub impulse: na::Vector3<Float>
+    pub impulse: na::Vector3<Float>,
+    pub v_rel_before: na::Vector3<Float>,
+    pub v_rel_after: na::Vector3<Float>,
+    pub rb_to: RigidBody,
+    pub rb_from: RigidBody,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct UpdateInfo {
     pub sep_plane: SeparatingPlane,
     pub contact_info: Option<ContactInfo>
@@ -540,7 +621,7 @@ pub struct UpdateInfo {
 
 pub fn handle_collision(rb1_in: &mut RigidBody,
                         rb2_in: &mut RigidBody,
-                        sep_plane: SeparatingPlane) {
+                        sep_plane: SeparatingPlane) -> ContactInfo {
     // TODO WHY DO WE NEED THIS CLONE
     let mut rb1 = rb1_in.clone();
     let mut rb2 = rb2_in.clone();
@@ -561,33 +642,22 @@ pub fn handle_collision(rb1_in: &mut RigidBody,
         };
         let mut contact = make_contact(contact_type, rb_to, rb_from);
 
-        let impulse = apply_impulses_from_contact(&mut contact);
-
-        let eps2 = 0.1 * 0.1;
-        if impulse.norm_squared() < eps2 &&
-               contact.rb_to.p.norm_squared() < eps2 &&
-               contact.rb_to.l.norm_squared() < eps2 {
-                contact.rb_to.active = false;
-        } else {
-            contact.rb_to.active = true;
-        }
-        if impulse.norm_squared() < eps2 &&
-               contact.rb_from.p.norm_squared() < eps2 &&
-               contact.rb_from.l.norm_squared() < eps2 {
-                contact.rb_from.active = false;
-        } else {
-            contact.rb_from.active = true;
-        }
+        let (v_rel_before, v_rel_after, impulse) = apply_impulses_from_contact(&mut contact);
 
         ContactInfo {
             contact_p: contact.position,
             contact_n: contact.normal,
-            impulse
+            impulse,
+            v_rel_before,
+            v_rel_after,
+            rb_to: rb_to.clone(),
+            rb_from: rb_from.clone()
         }
     };
 
     *rb1_in = rb1;
     *rb2_in = rb2;
+    return contact_info;
 }
 
 enum ContactType {
@@ -630,7 +700,8 @@ fn make_contact<'a, 'b>(contact_type: ContactType,
     }
 }
 
-fn apply_impulses_from_contact<'a>(c: &mut Contact<'a>) -> na::Vector3<Float> {
+// Returns: (v_rel before (to - from), v_rel_after, impulse)
+fn apply_impulses_from_contact<'a>(c: &mut Contact<'a>) -> (na::Vector3<Float>, na::Vector3<Float>, na::Vector3<Float>) {
     const COEFFICIENT_OF_RESTITUTION: Float = 0.5;
     const COEFFICIENT_OF_FRICTION: Float = 0.2;
     let v_to = c.rb_to.get_point_velocity(&c.position);
@@ -653,7 +724,7 @@ fn apply_impulses_from_contact<'a>(c: &mut Contact<'a>) -> na::Vector3<Float> {
 
     // frictional component
     let tangent = c.normal.cross(&v_rel).cross(&c.normal);
-    let mut fric_impulse;
+    let fric_impulse;
     // TODO come up with a better value for this I guess.
     if tangent.norm_squared() > 0.0001 * 0.0001 {
         let tangent = tangent.normalize();
@@ -682,7 +753,9 @@ fn apply_impulses_from_contact<'a>(c: &mut Contact<'a>) -> na::Vector3<Float> {
     c.rb_to.l += r_to.cross(&impulse);
     c.rb_from.l -= r_from.cross(&impulse);
 
-    return impulse;
+    let v_rel_new = c.rb_to.get_point_velocity(&c.position) - c.rb_from.get_point_velocity(&c.position);
+
+    return (v_rel, v_rel_new, impulse);
 }
 
 #[cfg(test)]
@@ -750,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn  separating_plane_maybe_degenerate_collision_test() {
+    fn separating_plane_maybe_degenerate_collision_test() {
         let box_mesh = Rc::new(unit_box_mesh());
         let rb1 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0, &box_mesh);
 
@@ -758,5 +831,113 @@ mod tests {
         rb2.set_pose(&na::Vector3::new(-0.9, 0.0, 0.0), &rb2.q());
 
         assert!(find_separating_plane(&rb1.tmesh(), &rb2.tmesh(), None).is_none());
+    }
+
+    // YO This one is really hard! It's not gravity that's causing this oscillation.
+    #[test]
+    fn resting_edge_edge_test() {
+        let mut ps = Scene::new();
+        ps.enable_gravity = false;
+        let box_mesh = Rc::new(unit_box_mesh());
+        // wall
+        // TODO: wall has non-zero p and l. Does that matter?
+        // let mut wall = RigidBody::new_static_box("wall", 10.0, 1.0, 10.0, &box_mesh);
+        // let x = na::Vector3::new(0.0, -5.5, 0.0);
+        // let q: na::UnitQuaternion<Float> = Default::default();
+        // wall.set_pose(&x, &q);
+        // let wall = ps.add_rb(wall);
+        // box1
+        let mut box1 = RigidBody::new_box(1.0, "box1", 1.0, 1.0, 1.0, &box_mesh);
+        let x = na::Vector3::new(-3.0169132, -3.3653288, -3.5509505);
+        let q = na::UnitQuaternion::<Float>::from_euler_angles(-0.8039882, 0.28533742, -2.1953382);
+        box1.set_pose(&x, &q);
+        box1.p = na::Vector3::new(-0.9383354, 0.45622417, 0.519677);
+        box1.l = na::Vector3::new(0.9216851, 0.91954553, -0.378117);
+        box1.active = false;
+        let box1 = ps.add_rb(box1);
+        // box2
+        let mut box2 = RigidBody::new_box(1.0, "box2", 1.0, 1.0, 1.0, &box_mesh);
+        let x = na::Vector3::new(-2.859328, -4.4902024, -2.6403682);
+        let q = na::UnitQuaternion::<Float>::from_euler_angles(-0.018460046, -0.21316701, 0.0016995296);
+        box2.set_pose(&x, &q);
+        box2.p = na::Vector3::new(-0.229679, -0.25147414, 0.82076985);
+        box2.l = na::Vector3::new(0.09784485, 0.049024202, 0.040893458);
+        box2.active = false;
+        let box2 = ps.add_rb(box2);
+
+        let dt = 1.0 / 60.0;
+        let (dt_out, contact_infos) = ps.update(dt);
+        println!("warmup dt: {}, warmup contacts: {}", dt_out, contact_infos.len());
+        ps.activate_all();
+        let (dt_out, contact_infos) = ps.update(dt);
+        println!("dt: {}", dt_out);
+        for c in contact_infos {
+            println!("v_rel facts: {} {}", c.v_rel_before.dot(&c.contact_n), c.v_rel_after.dot(&c.contact_n));
+            println!("{:#?}", c);
+            println!("===============");
+        }
+        println!("ITERATIONNNNNNNNNNNNNNNNNNNNNNNNNN");
+        let (dt_out, contact_infos) = ps.update(dt);
+        println!("dt: {}", dt_out);
+        for c in contact_infos {
+            println!("v_rel facts: {} {}", c.v_rel_before.dot(&c.contact_n), c.v_rel_after.dot(&c.contact_n));
+            println!("{:#?}", c);
+            println!("===============");
+        }
+
+        println!("ITERATIONNNNNNNNNNNNNNNNNNNNNNNNNN");
+        let (dt_out, contact_infos) = ps.update(dt);
+        println!("dt: {}", dt_out);
+        for c in contact_infos {
+            println!("v_rel facts: {} {}", c.v_rel_before.dot(&c.contact_n), c.v_rel_after.dot(&c.contact_n));
+            println!("{:#?}", c);
+            println!("===============");
+        }
+    }
+
+    #[test]
+    fn resting_vertex_face_test() {
+        let mut ps = Scene::new();
+        ps.enable_gravity = true;
+        let box_mesh = Rc::new(unit_box_mesh());
+        // wall
+        let mut wall = RigidBody::new_static_box("wall", 10.0, 1.0, 10.0, &box_mesh);
+        let x = na::Vector3::new(0.0, -5.5, 0.0);
+        let q: na::UnitQuaternion<Float> = Default::default();
+        wall.set_pose(&x, &q);
+        wall.p = na::Vector3::new(-0.02534554, -0.44694892, -0.015009386);
+        wall.l = na::Vector3::new(-1.3706628, 0.027466798, 1.4966589);
+        let wall = ps.add_rb(wall);
+        // box1
+        let mut box1 = RigidBody::new_box(1.0, "box1", 1.0, 1.0, 1.0, &box_mesh);
+        let x = na::Vector3::new(-2.9542038, -4.258529, -2.8331451);
+        let q = na::UnitQuaternion::<Float>::from_euler_angles(-0.53423434, -0.106729515, 0.13080074);
+        box1.set_pose(&x, &q);
+        box1.p = na::Vector3::new(0.02534554, -0.45102382, 0.015009386);
+        box1.l = na::Vector3::new(0.085633464, 0.00000000014370016, -0.14460458);
+        box1.active = false;
+        let box1 = ps.add_rb(box1);
+
+        let dt = 1.0 / 60.0;
+        let (dt_out, contact_infos) = ps.update(dt);
+        println!("warmup dt: {}, warmup contacts: {}", dt_out, contact_infos.len());
+        ps.activate_all();
+
+        let (dt_out, contact_infos) = ps.update(dt);
+        println!("dt: {}", dt_out);
+        for c in contact_infos {
+            println!("v_rel facts: {} {}", c.v_rel_before.dot(&c.contact_n), c.v_rel_after.dot(&c.contact_n));
+            println!("{:#?}", c);
+            println!("===============");
+        }
+
+        println!("ITERATIONNNNNNNNNNNNNNNNNNNNNNNNNN");
+        let (dt_out, contact_infos) = ps.update(dt);
+        println!("dt: {}", dt_out);
+        for c in contact_infos {
+            println!("v_rel facts: {} {}", c.v_rel_before.dot(&c.contact_n), c.v_rel_after.dot(&c.contact_n));
+            println!("{:#?}", c);
+            println!("===============");
+        }
     }
 }

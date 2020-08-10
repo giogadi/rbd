@@ -101,11 +101,12 @@ fn draw_vertex_velocities(rb: &physics::RigidBody, tmesh: &physics::TransformedM
 }
 
 fn make_room(dim: f32, mesh: &Rc<physics::Mesh>, physics_scene: &mut physics::Scene, window: &mut Window, only_render_floor: bool) {
+    let mut i = 0;
     for &offset in &[-0.5*dim - 0.5, 0.5*dim + 0.5] {
         for coord in 0..3 {
             let mut scale = na::Vector3::new(dim, dim, dim);
             scale[coord] = 1.0;
-            let mut rb = physics::RigidBody::new_static_box("wall", scale[0], scale[1], scale[2], mesh);
+            let mut rb = physics::RigidBody::new_static_box(&format!("wall{}", i), scale[0], scale[1], scale[2], mesh);
             let mut p = na::Vector3::<f32>::zeros();
             p[coord] = offset;
             rb.set_pose(&p, &Default::default());
@@ -116,6 +117,7 @@ fn make_room(dim: f32, mesh: &Rc<physics::Mesh>, physics_scene: &mut physics::Sc
                 c.set_color(0.8, 0.8, 0.8);
             }
             physics_scene.add_rb(rb);
+            i = i + 1;
         }
     }
 }
@@ -206,8 +208,9 @@ fn make_boxes(mesh: &Rc<physics::Mesh>, physics_scene: &mut physics::Scene, wind
     return vec![(rb1, c1), (rb2, c2), (rb3, c3)];
 }
 
-fn dump_state(physics_scene: &physics::Scene) {
+fn dump_state(iteration: usize, physics_scene: &physics::Scene) {
     let mut f = File::create("dump.txt").unwrap();
+    f.write_all(format!("iteration: {}\n", iteration).as_bytes());
     for i in 0..physics_scene.get_num_rbs() {
         let rb = physics_scene.get_rb(i);
         f.write_all(format!("============ {} ===========\n", rb.name).as_bytes()).unwrap();
@@ -217,6 +220,7 @@ fn dump_state(physics_scene: &physics::Scene) {
         f.write_all(format!("q: {}", eulers).as_bytes()).unwrap();
         f.write_all(format!("p: {}", rb.p).as_bytes()).unwrap();
         f.write_all(format!("l: {}", rb.l).as_bytes()).unwrap();
+        f.write_all(format!("s: {}", rb.scale).as_bytes()).unwrap();
         f.write_all(format!("active: {}\n", rb.active).as_bytes()).unwrap();
     }
 }
@@ -231,6 +235,7 @@ fn main() {
     window.set_light(Light::StickToCamera);
 
     let mut ps = physics::Scene::new();
+    ps.integration_scheme = physics::IntegrationScheme::ExplicitEuler;
 
     let box_mesh = Rc::new(physics::unit_box_mesh());
 
@@ -266,7 +271,7 @@ fn main() {
                     }
                 },
                 WindowEvent::Key(kiss3d::event::Key::D, Action::Press, _) => {
-                    dump_state(&ps);
+                    dump_state(n, &ps);
                 },
                 WindowEvent::Key(kiss3d::event::Key::N, Action::Press, _) => {
                     show_names = !show_names;
