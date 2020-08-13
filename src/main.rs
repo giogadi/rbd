@@ -77,7 +77,9 @@ fn draw_separating_plane_info(sep_plane: physics::SeparatingPlane, tmesh1: &phys
             window.draw_point(&na::Point3::from(fv2), &vertex_color);
             window.draw_point(&na::Point3::from(fv3), &vertex_color);
         },
-        physics::SeparatingPlane::Edges((m1v1, m1v2), (m2v1, m2v2)) => {
+        physics::SeparatingPlane::Edges(e1_idx, e2_idx) => {
+            let (m1v1, m1v2) = tmesh1.mesh.edges[e1_idx];
+            let (m2v1, m2v2) = tmesh2.mesh.edges[e2_idx];
             let (v1, v2) = physics::closest_points_on_edges(
                 &tmesh1.get_vertex(m1v1),& tmesh1.get_vertex(m1v2), &tmesh2.get_vertex(m2v1), &tmesh2.get_vertex(m2v2));
             window.draw_line(&na::Point3::from(v1), &na::Point3::from(v2), &vertex_color);
@@ -98,6 +100,15 @@ fn draw_vertex_velocities(rb: &physics::RigidBody, tmesh: &physics::TransformedM
         let v_dir = rb.get_point_velocity(&tmesh.get_vertex(i)).normalize();
         window.draw_line(&na::Point3::from(p), &na::Point3::from(p + v_dir*0.25), color);
     }
+}
+
+fn draw_contact_info(c: &physics::ContactInfo, window: &mut Window, color: &na::Point3<f32>, marker: &mut SceneNode) {
+    println!("contact_p: {}", c.contact_p);
+    println!("d: {}", c.d);
+    println!("contact_n: {}", c.contact_n);
+    marker.data_mut().set_local_translation(na::Translation::from(c.contact_p));
+    window.draw_point(&na::Point3::from(c.contact_p), color);
+    window.draw_line(&na::Point3::from(c.contact_p), &na::Point3::from(c.contact_p + c.contact_n), color);
 }
 
 fn make_room(dim: f32, mesh: &Rc<physics::Mesh>, physics_scene: &mut physics::Scene, window: &mut Window, only_render_floor: bool) {
@@ -133,7 +144,7 @@ fn aabb_overlap(p1: &na::Vector3<f32>, scale1: &na::Vector3<f32>, p2: &na::Vecto
 }
 
 fn make_random_boxes(n: usize, room_dim: f32, box_dim: f32, mesh: &Rc<physics::Mesh>, physics_scene: &mut physics::Scene, window: &mut Window) -> Vec<(usize, SceneNode)> {
-    let mut rng = rand::rngs::StdRng::seed_from_u64(2);
+    let mut rng = rand::rngs::StdRng::seed_from_u64(3);
     let bounding_dim = box_dim * 2.0f32.sqrt() + 0.1;
     let rng_dist = Uniform::new(-0.5*room_dim + 0.5*bounding_dim, 0.5*room_dim - 0.5*bounding_dim);
     let mut bounding_boxes = vec![];
@@ -167,6 +178,8 @@ fn make_random_boxes(n: usize, room_dim: f32, box_dim: f32, mesh: &Rc<physics::M
 }
 
 fn make_boxes(mesh: &Rc<physics::Mesh>, physics_scene: &mut physics::Scene, window: &mut Window) -> Vec<(usize, SceneNode)> {
+    let mut rbs = vec![];
+
     let scale = [1.0, 1.0, 1.0];
     let mut rb1 = physics::RigidBody::new_box(1.0, "red", scale[0], scale[1], scale[2], &mesh);
     let x: na::Vector3<f32> = Default::default();
@@ -178,34 +191,37 @@ fn make_boxes(mesh: &Rc<physics::Mesh>, physics_scene: &mut physics::Scene, wind
     c1.data_mut().set_local_rotation(physics_scene.get_rb(rb1).q());
     c1.data_mut().set_local_translation(na::Translation3::from(physics_scene.get_rb(rb1).x()));
     c1.set_color(1.0, 0.0, 0.0);
+    rbs.push((rb1, c1));
 
     let mut rb2 = physics::RigidBody::new_box(1.0, "green", scale[0], scale[1], scale[2], &mesh);
-    let x = na::Vector3::new(-2.5, 0.0, 0.0);
-    let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, na::RealField::frac_pi_4(), na::RealField::frac_pi_4()));
+    let x = na::Vector3::new((2.0 as f32).sqrt() + 1.0, 0.0, 0.0);
+    let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(na::RealField::frac_pi_2(), na::RealField::pi(), na::RealField::frac_pi_4()));
     // let q = na::UnitQuaternion::from_euler_angles(0.7938401, -1.3559403, -2.985731);
     rb2.set_pose(&x, &q);
-    rb2.p = na::Vector3::new(5.0, 0.0, 0.0);
+    rb2.p = na::Vector3::new(-1.0, 0.0, 0.0);
     // rb2.l = na::Vector3::new(0.0, 0.5, 0.0);
     let rb2 = physics_scene.add_rb(rb2);
     let mut c2      = window.add_cube(scale[0], scale[1], scale[2]);
     c2.data_mut().set_local_rotation(physics_scene.get_rb(rb2).q());
     c2.data_mut().set_local_translation(na::Translation3::from(physics_scene.get_rb(rb2).x()));
     c2.set_color(0.0, 1.0, 0.0);
+    rbs.push((rb2, c2));
 
-    let mut rb3 = physics::RigidBody::new_box(1.0, "blue", scale[0], scale[1], scale[2], &mesh);
-    let x = na::Vector3::new(2.0, 0.0, 0.0);
-    let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, na::RealField::frac_pi_4(), na::RealField::frac_pi_4()));
-    // let q = na::UnitQuaternion::from_euler_angles(0.7938401, -1.3559403, -2.985731);
-    rb3.set_pose(&x, &q);
-    // rb3.p = na::Vector3::new(0.5, 0.0, 0.0);
-    // rb2.l = na::Vector3::new(0.0, 0.5, 0.0);
-    let rb3 = physics_scene.add_rb(rb3);
-    let mut c3      = window.add_cube(scale[0], scale[1], scale[2]);
-    c3.data_mut().set_local_rotation(physics_scene.get_rb(rb3).q());
-    c3.data_mut().set_local_translation(na::Translation3::from(physics_scene.get_rb(rb3).x()));
-    c3.set_color(0.0, 0.0, 1.0);
+    // let mut rb3 = physics::RigidBody::new_box(1.0, "blue", scale[0], scale[1], scale[2], &mesh);
+    // let x = na::Vector3::new(2.0, 0.0, 0.0);
+    // let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, na::RealField::frac_pi_4(), na::RealField::frac_pi_4()));
+    // // let q = na::UnitQuaternion::from_euler_angles(0.7938401, -1.3559403, -2.985731);
+    // rb3.set_pose(&x, &q);
+    // // rb3.p = na::Vector3::new(0.5, 0.0, 0.0);
+    // // rb2.l = na::Vector3::new(0.0, 0.5, 0.0);
+    // let rb3 = physics_scene.add_rb(rb3);
+    // let mut c3      = window.add_cube(scale[0], scale[1], scale[2]);
+    // c3.data_mut().set_local_rotation(physics_scene.get_rb(rb3).q());
+    // c3.data_mut().set_local_translation(na::Translation3::from(physics_scene.get_rb(rb3).x()));
+    // c3.set_color(0.0, 0.0, 1.0);
+    // rbs.push((rb3, c3));
 
-    return vec![(rb1, c1), (rb2, c2), (rb3, c3)];
+    return rbs;
 }
 
 fn dump_state(iteration: usize, physics_scene: &physics::Scene) {
@@ -235,7 +251,10 @@ fn main() {
     window.set_light(Light::StickToCamera);
 
     let mut ps = physics::Scene::new();
-    ps.integration_scheme = physics::IntegrationScheme::ExplicitEuler;
+    // ps.integration_scheme = physics::IntegrationScheme::ExplicitEuler;
+    ps.integration_scheme = physics::IntegrationScheme::SemiImplicitEuler;
+    ps.enable_gravity = true;
+    //ps.enable_gravity = false;
 
     let box_mesh = Rc::new(physics::unit_box_mesh());
 
@@ -243,7 +262,12 @@ fn main() {
 
     make_room(ROOM_SIZE, &box_mesh, &mut ps, &mut window, true);
 
-    let mut boxes = make_random_boxes(7, ROOM_SIZE, 1.0, &box_mesh, &mut ps, &mut window);
+    let mut boxes = make_random_boxes(25, ROOM_SIZE, 1.0, &box_mesh, &mut ps, &mut window);
+    // let mut boxes = make_boxes(&box_mesh, &mut ps, &mut window);
+
+    let mut marker = window.add_sphere(0.1);
+    marker.set_visible(false);
+    marker.set_local_translation(na::Translation::from(na::Vector3::new(500.0, 500.0, 500.0)));
     
     let fps: u64 = 60; 
     let dt: physics::Float = 1.0 / (fps as physics::Float);
@@ -296,7 +320,18 @@ fn main() {
         }
 
         if !paused || do_step {            
-            ps.update(dt);
+            let contact_infos = ps.update(dt);
+
+            if contact_infos.1.len() > 0 {
+                marker.set_visible(true);
+            } else {
+                marker.set_visible(false);
+            }
+
+            // for c in contact_infos.1 {
+            //     draw_contact_info(&c, &mut window, &cyan, &mut marker);
+            // }
+
             do_step = false;
             // println!("ITERATION {}", n);
             n = n + 1;
@@ -306,6 +341,8 @@ fn main() {
             b.1.data_mut().set_local_rotation(ps.get_rb(b.0).q());
             b.1.data_mut().set_local_translation(na::Translation3::<f32>::from(ps.get_rb(b.0).x()));
         }
+
+        
 
         // draw_vertex_velocities(&rb1, &mut tmesh1, &mut window, &cyan);
         // draw_vertex_velocities(&rb2, &mut tmesh2, &mut window, &cyan);

@@ -33,91 +33,47 @@ impl Scene {
         return self.rbs.len() - 1;
     }
 
-    // TODO: Can we do this without cloning?
     pub fn update(&mut self, dt_in: Float) -> (Float, Vec<ContactInfo>) {
-        let mut latest_no_collision_t = 0.0;
-        let mut earliest_collision_t = dt_in;
-        let mut dt = dt_in;
-        // TODO: do we need to copy the separating planes???
-        let mut new_rbs = self.rbs.clone();
-        let mut prev_collisions: Vec<(usize, usize)> = vec![];
-        // TODO this gravity is FAKE! It assumes the RB has a mass of 1.0.
         let gravity;
         if self.enable_gravity {
             gravity = na::Vector3::new(0.0, -9.81, 0.0);
         } else {
             gravity = na::Vector3::new(0.0, 0.0, 0.0);
         }
-        let mut contact_infos = vec![];
-        loop {
-            // DEBUG DO NOT SUBMIT.
-            self.prev_sep_planes.clear();
-            for rb1_idx in 0..new_rbs.len() {
-                for rb2_idx in (rb1_idx + 1)..new_rbs.len() {
-                    let new_sep_plane = find_separating_plane(new_rbs[rb1_idx].tmesh(), new_rbs[rb2_idx].tmesh(), None);
-                    self.prev_sep_planes.insert((rb1_idx, rb2_idx), new_sep_plane.unwrap().0);
+        let mut collisions = vec![];
+        for rb1_idx in 0..self.rbs.len() {
+            for rb2_idx in (rb1_idx + 1)..self.rbs.len() {
+                if self.rbs[rb1_idx].m_inv <= 0.0 && self.rbs[rb2_idx].m_inv <= 0.0 {
+                    continue;
                 }
-            }
-
-            for rb in new_rbs.iter_mut() {
-                if rb.active {
-                    let gravity = if rb.m_inv > 0.0 { gravity / rb.m_inv } else { na::Vector3::zeros() };
-                    match self.integration_scheme {
-                        IntegrationScheme::ExplicitEuler => rb.explicit_euler_update(&gravity, &Default::default(), dt),
-                        IntegrationScheme::SemiImplicitEuler => rb.semi_implicit_euler_update(&gravity, &Default::default(), dt)
-                    }
+                let prev_sep_plane = self.prev_sep_planes.get(&(rb1_idx, rb2_idx)).copied();
+                let new_sep_plane = find_separating_plane(self.rbs[rb1_idx].tmesh(), self.rbs[rb2_idx].tmesh(), prev_sep_plane);
+                if new_sep_plane.1 <= 0.0 {
+                    collisions.push((rb1_idx, rb2_idx, new_sep_plane.1));
                 }
-            }
-            let mut collisions = vec![];
-            for rb1_idx in 0..new_rbs.len() {
-                for rb2_idx in (rb1_idx + 1)..new_rbs.len() {
-                    // TODO: This AABB pre-check causes us to not find sep planes when we need them in the hashmap
-                    //
-                    // TODO: need to use the max of the rb scale components because these scales are in body frame!!!
-                    // let scale1 = new_rbs[rb1_idx].scale * ((2.0 as Float).sqrt() + 0.01);
-                    // let scale2 = new_rbs[rb2_idx].scale * ((2.0 as Float).sqrt() + 0.01);
-                    // if !aabb_overlap(&new_rbs[rb1_idx].x(), &scale1, &new_rbs[rb2_idx].x(), &scale2) {
-                    //     continue;
-                    // }
-
-                    let prev_sep_plane = self.prev_sep_planes.get(&(rb1_idx, rb2_idx)).copied();
-                    let new_sep_plane = find_separating_plane(new_rbs[rb1_idx].tmesh(), new_rbs[rb2_idx].tmesh(), prev_sep_plane);
-                    if new_sep_plane.is_some() {
-                        // TODO idk wtf I'm doing
-                        self.prev_sep_planes.insert((rb1_idx, rb2_idx), new_sep_plane.unwrap().0);
-                    } else {
-                        collisions.push((rb1_idx, rb2_idx));
-                    }
-                }
-            }
-
-            if collisions.is_empty() {
-                // Hooray - but if we were correcting a collision, let's resolve those.
-                for (rb1_idx, rb2_idx) in prev_collisions {
-                    let mut rb1 = new_rbs[rb1_idx].clone();
-                    let mut rb2 = new_rbs[rb2_idx].clone();
-                    contact_infos.push(handle_collision(&mut rb1, &mut rb2, self.prev_sep_planes[&(rb1_idx, rb2_idx)]));
-                    new_rbs[rb1_idx] = rb1;
-                    new_rbs[rb2_idx] = rb2;
-                }
-
-                // TODO: Add actual collision-time-find here
-                latest_no_collision_t = dt;
-
-                break;
-
-            } else {
-                prev_collisions = collisions;
-                new_rbs = self.rbs.clone();
-                earliest_collision_t = dt;
-                dt = (earliest_collision_t + latest_no_collision_t) * 0.5;
-                contact_infos.clear();
+                self.prev_sep_planes.insert((rb1_idx, rb2_idx), new_sep_plane.0);
             }
         }
-        // println!("dt: {}", dt);
 
-        self.rbs = new_rbs;
-        return (dt, contact_infos);
+        let mut contact_infos = vec![];
+        for (rb1_idx, rb2_idx, d) in collisions {
+            let mut rb1 = self.rbs[rb1_idx].clone();
+            let mut rb2 = self.rbs[rb2_idx].clone();
+            contact_infos.push(handle_collision(&mut rb1, &mut rb2, self.prev_sep_planes[&(rb1_idx, rb2_idx)], d));
+            self.rbs[rb1_idx] = rb1;
+            self.rbs[rb2_idx] = rb2;
+        }
+
+        for rb in self.rbs.iter_mut() {
+            if rb.active {
+                let gravity = if rb.m_inv > 0.0 { gravity / rb.m_inv } else { na::Vector3::zeros() };
+                match self.integration_scheme {
+                    IntegrationScheme::ExplicitEuler => rb.explicit_euler_update(&gravity, &Default::default(), dt_in),
+                    IntegrationScheme::SemiImplicitEuler => rb.semi_implicit_euler_update(&gravity, &Default::default(), dt_in)
+                }
+            }
+        }
+        return (dt_in, contact_infos);
     }
 
     pub fn get_num_rbs(&self) -> usize {
@@ -324,6 +280,8 @@ pub struct Mesh {
     pub vertices: Vec<na::Vector3<Float>>,
     pub edges: Vec<(usize, usize)>,
     pub quads: Vec<[usize; 4]>,
+    // one entry for each edge, each entry is a pair of face indices.
+    pub edge_to_quad_map: Vec<(usize, usize)>,
 }
 
 pub fn unit_box_mesh() -> Mesh {
@@ -343,15 +301,21 @@ pub fn unit_box_mesh() -> Mesh {
     ];
 
     let quads = vec![
-        [2, 3, 7, 6],  // top
-        [0, 4, 5, 1],  // bottom
-        [0, 2, 6, 4], // front
-        [1, 5, 7, 3], // back
-        [4, 6, 7, 5], // left
-        [0, 1, 3, 2], // right
+        [2, 3, 7, 6], // +y
+        [0, 4, 5, 1], // -y
+        [0, 2, 6, 4], // -z
+        [1, 5, 7, 3], // +z
+        [4, 6, 7, 5], // +x
+        [0, 1, 3, 2], // -x
     ];
 
-    return Mesh { vertices, edges, quads};
+    let edge_to_quad_map = vec![
+        (1, 2), (1, 4), (1, 3), (1, 5),
+        (0, 5), (0, 3), (0, 4), (0, 2),
+        (2, 5), (3, 5), (2, 4), (3, 4)
+    ];
+
+    return Mesh { vertices, edges, quads, edge_to_quad_map };
 }
 
 #[derive(Clone)]
@@ -408,163 +372,173 @@ impl TransformedMesh {
             *v = None;
         }
     }
+
+    pub fn get_position(&self) -> na::Vector3<Float> {
+        return self.transform.p;
+    }
+
+    // TODO: Make more code below use this util
+    pub fn get_face_normal_unnormalized(&self, face_idx: usize) -> na::Vector3<Float> {
+        let face_verts = &self.mesh.quads[face_idx];
+        let v0 = self.get_vertex(face_verts[0]);
+        let v1 = self.get_vertex(face_verts[1]);
+        let v2 = self.get_vertex(face_verts[2]);
+        return (v1 - v0).cross(&(v2 - v0));
+    }
 }
 
-fn does_face_plane_separate_meshes<'a>(mesh1: &TransformedMesh, face_on_mesh1: &[usize; 4], mesh2: &TransformedMesh) -> Option<(Float, usize)> {
+fn min_proj_mesh2_onto_mesh_1_face(mesh1: &TransformedMesh, face_on_mesh1: &[usize; 4], mesh2: &TransformedMesh) -> (Float, usize) {
     let v0 = mesh1.get_vertex(face_on_mesh1[0]);
     let v1 = mesh1.get_vertex(face_on_mesh1[1]);
     let v2 = mesh1.get_vertex(face_on_mesh1[2]);
     let plane_n = (v1 - v0).cross(&(v2 - v0)).normalize();
     let plane_p = v0;
 
-    let mut min_dist = Float::MAX;
-    let mut min_dist_idx = 0;
+    let mut min_proj = Float::MAX;
+    let mut min_proj_idx = None;
     for v_idx in 0..mesh2.mesh.vertices.len() {
         let d = signed_dist_from_plane(&mesh2.get_vertex(v_idx), &plane_p, &plane_n);
-        if d < 0.0 {
-            // println!("FACE-VERTEX: {}", v_idx);
-            return None;
-        }
-        if d < min_dist {
-            min_dist = d;
-            min_dist_idx = v_idx;
+        if d < min_proj {
+            min_proj = d;
+            min_proj_idx = Some(v_idx);
         }
     }
-    return Some((min_dist, min_dist_idx));
+    if min_proj_idx.is_none() {
+        panic!("mesh has no vertices: {}", mesh2.get_vertex(0));
+    }
+    return (min_proj, min_proj_idx.unwrap());
 }
 
-// Returns:
-// 0: min dist of mesh2's verts from plane
-// 1: pair of dists: edge_on_mesh2's vertex dists from plane
-fn does_edge_plane_separate_meshes<'a>(mesh1: &TransformedMesh, edge_on_mesh1: (usize, usize),
-                                       mesh2: &TransformedMesh, edge_on_mesh2: (usize, usize)) -> Option<(Float, (Float, Float))> {
-    let (m1v1, m1v2) = edge_on_mesh1;
-    let (m2v1, m2v2) = edge_on_mesh2;
-    let plane_p = mesh1.get_vertex(m1v1);
-    let mut plane_n = (mesh1.get_vertex(m1v2) - mesh1.get_vertex(m1v1)).cross(&(mesh2.get_vertex(m2v2) - mesh2.get_vertex(m2v1))).normalize();
+// https://www.gdcvault.com/play/1017646/Physics-for-Game-Programmers-The
+fn do_edges_form_minkowski_face(mesh1: &TransformedMesh, mesh1_edge_idx: usize,
+                                mesh2: &TransformedMesh, mesh2_edge_idx: usize) -> bool {
+    // TODO: Maybe cache face normals instead of recomputing them here.
+    // TODO: Is it okay for these face normals to be unnormalized?
+    let a = mesh1.get_face_normal_unnormalized(mesh1.mesh.edge_to_quad_map[mesh1_edge_idx].0);
+    let b = mesh1.get_face_normal_unnormalized(mesh1.mesh.edge_to_quad_map[mesh1_edge_idx].1);
+    let c = -mesh2.get_face_normal_unnormalized(mesh2.mesh.edge_to_quad_map[mesh2_edge_idx].0);
+    let d = -mesh2.get_face_normal_unnormalized(mesh2.mesh.edge_to_quad_map[mesh2_edge_idx].1);
 
-    let mut d = signed_dist_from_plane(&mesh2.get_vertex(0), &plane_p, &plane_n);
-    if d < 0.0 {
-        // We want to keep the convention of "normals point from Mesh1 to Mesh2".
-        // Therefore, we change the plane normal to point in the direction of the first vertex in Mesh2.
-        // If this is a valid separating plane, this will be the correct normal direction.
-        //
-        // TODO: This doesn't actually matter if we don't use the sign of the return value, or pass this normal
-        // direction all the way to Contact creation.
+    let b_x_a = b.cross(&a);
+    let d_x_c = d.cross(&c);
+    let cba = c.dot(&b_x_a);
+    let dba = d.dot(&b_x_a);
+    let adc = a.dot(&d_x_c);
+    let bdc = b.dot(&d_x_c);
+    return (cba * dba < 0.0) && (adc * bdc < 0.0) && (cba * bdc > 0.0);
+}
+
+// Signed dist from edge1 to edge2 (positive means edge2 is outside mesh1)
+fn signed_dist_from_mesh1_edge_to_mesh2_edge(
+    mesh1: &TransformedMesh, mesh1_edge_idx: usize,
+    mesh2: &TransformedMesh, mesh2_edge_idx: usize) -> Float {
+    let (e1v1_idx, e1v2_idx) = mesh1.mesh.edges[mesh1_edge_idx];
+    let (e1v1, e1v2) = (mesh1.get_vertex(e1v1_idx), mesh1.get_vertex(e1v2_idx));
+    let (e2v1_idx, e2v2_idx) = mesh2.mesh.edges[mesh2_edge_idx];
+    let (e2v1, e2v2) = (mesh2.get_vertex(e2v1_idx), mesh2.get_vertex(e2v2_idx));
+
+    // TODO: we should cache these normalize edge vectors.
+    let e1 = (e1v2 - e1v1).normalize();
+    let e2 = (e2v2 - e2v1).normalize();
+    let mut plane_n = e1.cross(&e2);
+
+    // If the edges are nearly parallel, skip this edge by returning the worst possible distance.
+    let eps = 0.0001;
+    if plane_n.norm_squared() < eps * eps {
+        return Float::MIN;
+    }
+
+    plane_n = plane_n.normalize();
+
+    // Ensure that plane_n points outward from mesh1.
+    if plane_n.dot(&(e1v1 - mesh1.get_position())) < 0.0 {
         plane_n = -plane_n;
-        d = -d;
     }
-    let d = d;
-    let plane_n = plane_n;
 
-    let mesh2_side = d >= 0.0;
-    let mut min_dist = d.abs();
-    for v_idx in 1..mesh2.mesh.vertices.len() {
-        let d = signed_dist_from_plane(&mesh2.get_vertex(v_idx), &plane_p, &plane_n);
-        let side = d >= 0.0;
-        if side != mesh2_side {
-            // TODO: This debug msg is not totally helpful: this might not actually be the colliding vertex.
-            // let x = mesh2.get_vertex(v_idx);
-            // println!("EDGE-EDGE (rb2 vertex {} {} {} {})", v_idx, x[0], x[1], x[2]);
-            return None;
-        }
-        min_dist = min_dist.min(d.abs());
-    }
-    for v_idx in 0..mesh1.mesh.vertices.len() {
-        // TODO: Can we do this? I think so...
-        if v_idx == m1v1 || v_idx == m1v2 {
-            continue;
-        }
-        let d = signed_dist_from_plane(&mesh1.get_vertex(v_idx), &plane_p, &plane_n);
-        let side = d >= 0.0;
-        if side == mesh2_side {
-            // TODO: This debug msg is not totally helpful: this might not actually be the colliding vertex.
-            // let x = mesh1.get_vertex(v_idx);
-            // println!("EDGE-EDGE (rb1 vertex {} {} {} {})", v_idx, x[0], x[1], x[2]);
-            return None;
-        }
-    }
-    return Some((min_dist,
-        (signed_dist_from_plane(&mesh2.get_vertex(m2v1), &plane_p, &plane_n),
-         signed_dist_from_plane(&mesh2.get_vertex(m2v2), &plane_p, &plane_n))));
+    return (e2v1 - e1v1).dot(&plane_n);
 }
 
 #[derive(Clone, Copy)]
 pub enum SeparatingPlane {
     Mesh1Face([usize; 4], usize), // face on 1 and vert on 2
     Mesh2Face([usize; 4], usize), // face on 2 and vert on 1
-    Edges((usize, usize), (usize, usize))
+    Edges(usize, usize) // edge_idx on 1 and edge_idx on 2
 }
 
-// TODO: optimize the edge-edge stuff using techniques from Dirk Gregorius's GDC talk.
-pub fn find_separating_plane<'a>(mesh1: &TransformedMesh, mesh2: &TransformedMesh,
-                                 initial_guess: Option<SeparatingPlane>) -> Option<(SeparatingPlane, Float)> {
+pub fn find_separating_plane(mesh1: &TransformedMesh, mesh2: &TransformedMesh,
+                             initial_guess: Option<SeparatingPlane>) -> (SeparatingPlane, Float) {
     if initial_guess.is_some() {
         let initial_guess = initial_guess.unwrap();
         match initial_guess {
             SeparatingPlane::Mesh1Face(f, _) => {
-                let p = does_face_plane_separate_meshes(mesh1, &f, mesh2);
-                if p.is_some() {
-                    let p = p.unwrap();
-                    return Some((SeparatingPlane::Mesh1Face(f, p.1), p.0));
+                let (d, v) = min_proj_mesh2_onto_mesh_1_face(mesh1, &f, mesh2);
+                if d > 0.0 {
+                    return (SeparatingPlane::Mesh1Face(f, v), d);
                 }
             },
             SeparatingPlane::Mesh2Face(f, _) => {
-                let p = does_face_plane_separate_meshes(mesh2, &f, mesh1);
-                if p.is_some() {
-                    let p = p.unwrap();
-                    return Some((SeparatingPlane::Mesh2Face(f, p.1), p.0));
+                let (d, v) = min_proj_mesh2_onto_mesh_1_face(mesh2, &f, mesh1);
+                if d > 0.0 {
+                    return (SeparatingPlane::Mesh2Face(f, v), d);
                 }
             },
-            SeparatingPlane::Edges(e1, e2) => {
-                let d = does_edge_plane_separate_meshes(mesh1, e1, mesh2, e2);
-                if d.is_some() {
-                    return Some((SeparatingPlane::Edges(e1, e2), d.unwrap().0))
+            SeparatingPlane::Edges(e1_idx, e2_idx) => {
+                let d = signed_dist_from_mesh1_edge_to_mesh2_edge(mesh1, e1_idx, mesh2, e2_idx);
+                if d > 0.0 {
+                    return (SeparatingPlane::Edges(e1_idx, e2_idx), d);
                 }
             }
         };
     }
     
     // Look for a separating plane in the faces of mesh1 and mesh2.
-    // TODO: 
+    let mut max_proj_sep_plane = None;
+    let mut max_proj = Float::MIN;
     for f in mesh1.mesh.quads.iter() {
-        let d = does_face_plane_separate_meshes(mesh1, f, mesh2);
-        if d.is_some() {
-            let d = d.unwrap();
-            return Some((SeparatingPlane::Mesh1Face(*f, d.1), d.0));
+        let (d, v) = min_proj_mesh2_onto_mesh_1_face(mesh1, f, mesh2);
+        let sep_plane = SeparatingPlane::Mesh1Face(*f, v);
+        if d > 0.0 {
+            return (sep_plane, d);
+        }
+        if d > max_proj {
+            max_proj_sep_plane = Some(sep_plane);
+            max_proj = d;
         }
     }
     for f in mesh2.mesh.quads.iter() {
-        let d = does_face_plane_separate_meshes(mesh2, f, mesh1);
-        if d.is_some() {
-            let d = d.unwrap();
-            return Some((SeparatingPlane::Mesh2Face(*f, d.1), d.0));
+        let (d, v) = min_proj_mesh2_onto_mesh_1_face(mesh2, f, mesh1);
+        let sep_plane = SeparatingPlane::Mesh2Face(*f, v);
+        if d > 0.0 {
+            return (sep_plane, d);
+        }
+        if d > max_proj {
+            max_proj_sep_plane = Some(sep_plane);
+            max_proj = d;
         }
     }
-
-    // Look for a separating plane in the cross products of the edges of mesh1 and mesh2.
-    let mut min_edge_dist = f32::MAX;
-    let mut min_dist_edges = None;
-    for &edge1 in mesh1.mesh.edges.iter() {
-        for &edge2 in mesh2.mesh.edges.iter() {
-            let d = does_edge_plane_separate_meshes(mesh1, edge1, mesh2, edge2);
-            if d.is_some() {
-                // Look for the "support edges", which are the SAT edges that are actually near each other. 
-                let d = d.unwrap();
-                let (ed1, ed2) = d.1;
-                if ed1.abs() < min_edge_dist || ed2.abs() < min_edge_dist {
-                    min_edge_dist = ed1.abs().min(ed2.abs());
-                    min_dist_edges = Some((edge1, edge2));
-                }
+    for e1_idx in 0..mesh1.mesh.edges.len() {
+        for e2_idx in 0..mesh2.mesh.edges.len() {
+            if !do_edges_form_minkowski_face(mesh1, e1_idx, mesh2, e2_idx) {
+                continue;
+            }
+            let d = signed_dist_from_mesh1_edge_to_mesh2_edge(mesh1, e1_idx, mesh2, e2_idx);
+            let sep_plane = SeparatingPlane::Edges(e1_idx, e2_idx);
+            if d > 0.0 {
+                return (sep_plane, d);
+            }
+            if d > max_proj {
+                max_proj_sep_plane = Some(sep_plane);
+                max_proj = d;
             }
         }
     }
-    if min_dist_edges.is_some() {
-        let min_dist_edges = min_dist_edges.unwrap();
-        return Some((SeparatingPlane::Edges(min_dist_edges.0, min_dist_edges.1), min_edge_dist));
+
+    // Should never happen.
+    if max_proj_sep_plane.is_none() {
+        panic!("max_proj_sep_plane is None");
     }
 
-    return None;
+    return (max_proj_sep_plane.unwrap(), max_proj);
 }
 
 fn d_mnop(m: &na::Vector3<Float>, n: &na::Vector3<Float>,
@@ -611,6 +585,7 @@ pub struct ContactInfo {
     pub v_rel_after: na::Vector3<Float>,
     pub rb_to: RigidBody,
     pub rb_from: RigidBody,
+    pub d: Float
 }
 
 #[derive(Clone)]
@@ -621,7 +596,10 @@ pub struct UpdateInfo {
 
 pub fn handle_collision(rb1_in: &mut RigidBody,
                         rb2_in: &mut RigidBody,
-                        sep_plane: SeparatingPlane) -> ContactInfo {
+                        sep_plane: SeparatingPlane,
+                        d: Float) -> ContactInfo {
+    
+    
     // TODO WHY DO WE NEED THIS CLONE
     let mut rb1 = rb1_in.clone();
     let mut rb2 = rb2_in.clone();
@@ -635,14 +613,30 @@ pub fn handle_collision(rb1_in: &mut RigidBody,
                 // println!("mesh2 face");
                 (&mut rb1, &mut rb2, ContactType::VertexFace(v, f))
             },
-            SeparatingPlane::Edges(e1, e2) => {
+            SeparatingPlane::Edges(e1_idx, e2_idx) => {
                 // println!("edges");
+                let e1 = rb1.tmesh.mesh.edges[e1_idx];
+                let e2 = rb2.tmesh.mesh.edges[e2_idx];
                 (&mut rb1, &mut rb2, ContactType::EdgeEdge(e1, e2))
             }
         };
         let mut contact = make_contact(contact_type, rb_to, rb_from);
 
-        let (v_rel_before, v_rel_after, impulse) = apply_impulses_from_contact(&mut contact);
+        let (v_rel_before, v_rel_after, impulse) = apply_impulses_from_contact(&mut contact, d);
+
+        // EXPERIMENTAL: move objects out of collision
+        // if d < 0.0 && (contact.rb_to.m_inv > 0.0 || contact.rb_from.m_inv > 0.0) {
+        //     let d = d.abs();
+        //     if contact.rb_to.m_inv <= 0.0 {
+        //         contact.rb_from.set_pose(&(contact.rb_from.x() - d * contact.normal), &contact.rb_from.q());
+        //     } else if contact.rb_from.m_inv <= 0.0 {
+        //         contact.rb_to.set_pose(&(contact.rb_to.x() + d * contact.normal), &contact.rb_to.q());
+        //     } else {
+        //         let a = (1.0 / contact.rb_to.m_inv) / ((1.0 / contact.rb_to.m_inv) + (1.0 / contact.rb_from.m_inv));
+        //         contact.rb_to.set_pose(&(contact.rb_to.x() + (1.0-a)*d*contact.normal), &contact.rb_to.q());
+        //         contact.rb_from.set_pose(&(contact.rb_from.x() - a*d*contact.normal), &contact.rb_from.q());
+        //     }
+        // }
 
         ContactInfo {
             contact_p: contact.position,
@@ -651,7 +645,8 @@ pub fn handle_collision(rb1_in: &mut RigidBody,
             v_rel_before,
             v_rel_after,
             rb_to: rb_to.clone(),
-            rb_from: rb_from.clone()
+            rb_from: rb_from.clone(),
+            d
         }
     };
 
@@ -672,8 +667,8 @@ struct Contact<'a> {
     normal: na::Vector3<Float>
 }
 
-fn make_contact<'a, 'b>(contact_type: ContactType,
-                        rb_to: &'a mut RigidBody, rb_from: &'a mut RigidBody) -> Contact<'a> {
+fn make_contact<'a>(contact_type: ContactType,
+                    rb_to: &'a mut RigidBody, rb_from: &'a mut RigidBody) -> Contact<'a> {
     // TODO: Maybe make sure that the plane_n's are not degenerate before normalizing.
     let (position, normal) = match contact_type {
         ContactType::VertexFace(to_v, from_f) => {
@@ -687,7 +682,7 @@ fn make_contact<'a, 'b>(contact_type: ContactType,
             let u = rb_to.tmesh().get_vertex(to_v1) - rb_to.tmesh().get_vertex(to_v0);
             let v = rb_from.tmesh().get_vertex(from_v1) - rb_from.tmesh().get_vertex(from_v0);
             let mut edge_n = u.cross(&v).normalize();
-            if point_on_positive_side_of_plane(&rb_from.tmesh().get_vertex(from_v0), &rb_to.tmesh().get_vertex(to_v0), &edge_n) {
+            if (rb_from.tmesh().get_vertex(from_v1) - rb_from.tmesh().get_position()).dot(&edge_n) < 0.0 {
                 edge_n = -edge_n;
             }
             (closest_points_on_edges(&rb_to.tmesh().get_vertex(to_v0), &rb_to.tmesh().get_vertex(to_v1),
@@ -701,9 +696,11 @@ fn make_contact<'a, 'b>(contact_type: ContactType,
 }
 
 // Returns: (v_rel before (to - from), v_rel_after, impulse)
-fn apply_impulses_from_contact<'a>(c: &mut Contact<'a>) -> (na::Vector3<Float>, na::Vector3<Float>, na::Vector3<Float>) {
-    const COEFFICIENT_OF_RESTITUTION: Float = 0.5;
+fn apply_impulses_from_contact<'a>(c: &mut Contact<'a>, d: Float) -> (na::Vector3<Float>, na::Vector3<Float>, na::Vector3<Float>) {
+    const COEFFICIENT_OF_RESTITUTION: Float = 0.3;
     const COEFFICIENT_OF_FRICTION: Float = 0.2;
+    let eps = 0.00001;
+
     let v_to = c.rb_to.get_point_velocity(&c.position);
     let v_from = c.rb_from.get_point_velocity(&c.position);
     let v_rel = v_to - v_from;
@@ -714,11 +711,20 @@ fn apply_impulses_from_contact<'a>(c: &mut Contact<'a>) -> (na::Vector3<Float>, 
     let r_to = c.position - c.rb_to.x;
     let r_from = c.position - c.rb_from.x;
 
-    // normal component
+    // YO: Apparently this is very important???
     let v_rel_n = c.normal.dot(&(v_to - v_from));
+    if v_rel_n > 0.0 {
+        return (v_rel, v_rel, na::Vector3::zeros());
+    }
+
+    // normal component
     let to_term = (I_inv_to * (r_to.cross(&c.normal))).cross(&r_to);
     let from_term = (I_inv_from * (r_from.cross(&c.normal))).cross(&r_from);
     let denom = c.rb_to.m_inv + c.rb_from.m_inv + c.normal.dot(&to_term) + c.normal.dot(&from_term);
+    // TODO: do we need to tune this eps value?
+    if denom.abs() < eps {
+        return (v_rel, v_rel, na::Vector3::zeros());
+    }
     let j_normal = -(1.0 + COEFFICIENT_OF_RESTITUTION) * v_rel_n / denom;
     let normal_impulse = j_normal * c.normal;
 
@@ -726,19 +732,33 @@ fn apply_impulses_from_contact<'a>(c: &mut Contact<'a>) -> (na::Vector3<Float>, 
     let tangent = c.normal.cross(&v_rel).cross(&c.normal);
     let fric_impulse;
     // TODO come up with a better value for this I guess.
-    if tangent.norm_squared() > 0.0001 * 0.0001 {
+    if tangent.norm_squared() > eps * eps {
         let tangent = tangent.normalize();
         let to_term = (I_inv_to * (r_to.cross(&tangent))).cross(&r_to);
         let from_term = (I_inv_from * (r_from.cross(&tangent))).cross(&r_from);
         let denom = c.rb_to.m_inv + c.rb_from.m_inv + tangent.dot(&to_term) + tangent.dot(&from_term);
-        let j_fric = (-1.0 + COEFFICIENT_OF_RESTITUTION) * v_rel.dot(&tangent) / denom;
-        let j_fric = j_fric.max(-COEFFICIENT_OF_FRICTION*j_normal).min(COEFFICIENT_OF_FRICTION*j_normal);
-        fric_impulse = j_fric * tangent;
+        // TODO: when can this happen? And what should eps be?
+        if denom < eps {
+            fric_impulse = na::Vector3::zeros();
+        } else {
+            let j_fric = (-1.0 + COEFFICIENT_OF_RESTITUTION) * v_rel.dot(&tangent) / denom;
+            let j_fric = j_fric.max(-COEFFICIENT_OF_FRICTION*j_normal).min(COEFFICIENT_OF_FRICTION*j_normal);
+            fric_impulse = j_fric * tangent;
+        }
     } else {
         fric_impulse = na::Vector3::zeros();
     }
 
-    let impulse = normal_impulse + fric_impulse;
+    // EXPERIMENTAL: penetration correction
+    let pen_impulse;
+    if d < 0.0 {
+        let factor = 1.5;
+        pen_impulse = factor * d.abs() * c.normal;
+    } else {
+        pen_impulse = na::Vector3::zeros();
+    }
+
+    let impulse = normal_impulse + fric_impulse + pen_impulse;
 
     // if c.rb_to.m_inv > 0.0 {
     //     println!("{} {} {} {}", normal_impulse.norm(), fric_impulse.norm(), c.rb_to.p.norm(), c.rb_to.l.norm());
@@ -773,8 +793,8 @@ mod tests {
         rb2.set_pose(&x, &q);
 
         let sep_plane = find_separating_plane(rb1.tmesh(), rb2.tmesh(), None);
-        assert!(sep_plane.is_some());
-        assert!(find_separating_plane(rb1.tmesh(), rb2.tmesh(), Some(sep_plane.unwrap().0)).is_some());
+        assert!(sep_plane.1 > 0.0);
+        assert!(find_separating_plane(rb1.tmesh(), rb2.tmesh(), Some(sep_plane.0)).1 > 0.0);
     }
 
     #[test]
@@ -788,7 +808,8 @@ mod tests {
         let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(na::RealField::frac_pi_4(), 0.0, na::RealField::frac_pi_4()));
         rb2.set_pose(&x, &q);
 
-        assert!(find_separating_plane(rb1.tmesh(), rb2.tmesh(), None).is_none());
+        let sep_plane = find_separating_plane(rb1.tmesh(), rb2.tmesh(), None);
+        assert!(find_separating_plane(rb1.tmesh(), rb2.tmesh(), None).1 < 0.0, "{}", sep_plane.1);
     }
 
     #[test]
@@ -804,7 +825,7 @@ mod tests {
         let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, 0.0, na::RealField::frac_pi_4()));
         rb2.set_pose(&x, &q);
 
-        assert!(find_separating_plane(rb1.tmesh(), rb2.tmesh(), None).is_none());
+        assert!(find_separating_plane(rb1.tmesh(), rb2.tmesh(), None).1 < 0.0);
     }
 
     #[test]
@@ -819,7 +840,33 @@ mod tests {
         let q = na::UnitQuaternion::from_euler_angles(0.7938401, -1.3559403, -2.985731);
         rb2.set_pose(&x, &q);
 
-        assert!(find_separating_plane(&rb1.tmesh(), &rb2.tmesh(), None).is_some());
+        let sep_plane = find_separating_plane(&rb1.tmesh(), &rb2.tmesh(), None);
+        assert!(sep_plane.1 > 0.0, "{}", sep_plane.1);
+    }
+
+    #[test]
+    fn separating_plane_edge_edge_collision() {
+        let box_mesh = Rc::new(unit_box_mesh());
+        let mut rb1 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0, &box_mesh);
+        let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(0.0, na::RealField::frac_pi_4(), 0.0));
+        rb1.set_pose(&rb1.x(), &q);
+
+        let mut rb2 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0, &box_mesh);
+        let x = na::Vector3::new((2.0 as Float).sqrt() - 0.001, 0.0, 0.0);
+        let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(na::RealField::frac_pi_4(), na::RealField::frac_pi_2(), na::RealField::frac_pi_2()));
+        // let q = na::UnitQuaternion::from_rotation_matrix(&na::Rotation3::from_euler_angles(na::RealField::frac_pi_2(), na::RealField::pi(), na::RealField::frac_pi_4()));
+        rb2.set_pose(&x, &q);
+
+        let sep_plane = find_separating_plane(&rb1.tmesh(), &rb2.tmesh(), None);
+        assert!(sep_plane.1 <= 0.0, "{}", sep_plane.1);
+        match sep_plane {
+            (SeparatingPlane::Edges(_,_), d) => {
+
+            },
+            _ => {
+                panic!("bad plane");
+            }
+        }
     }
 
     #[test]
@@ -830,7 +877,8 @@ mod tests {
         let mut rb2 = RigidBody::new_box(1.0, "", 1.0, 1.0, 1.0, &box_mesh);
         rb2.set_pose(&na::Vector3::new(-0.9, 0.0, 0.0), &rb2.q());
 
-        assert!(find_separating_plane(&rb1.tmesh(), &rb2.tmesh(), None).is_none());
+        let sep_plane = find_separating_plane(&rb1.tmesh(), &rb2.tmesh(), None);
+        assert!(sep_plane.1 < 0.0, "{}", sep_plane.1);
     }
 
     // YO This one is really hard! It's not gravity that's causing this oscillation.
@@ -895,10 +943,12 @@ mod tests {
         }
     }
 
+    // TODO: WTF????
     #[test]
     fn resting_vertex_face_test() {
+        println!("HOWDY");
         let mut ps = Scene::new();
-        ps.enable_gravity = true;
+        ps.enable_gravity = false;
         let box_mesh = Rc::new(unit_box_mesh());
         // wall
         let mut wall = RigidBody::new_static_box("wall", 10.0, 1.0, 10.0, &box_mesh);
@@ -910,7 +960,8 @@ mod tests {
         let wall = ps.add_rb(wall);
         // box1
         let mut box1 = RigidBody::new_box(1.0, "box1", 1.0, 1.0, 1.0, &box_mesh);
-        let x = na::Vector3::new(-2.9542038, -4.258529, -2.8331451);
+        //let x = na::Vector3::new(-2.9542038, -4.258529, -2.8331451);
+        let x = na::Vector3::new(-2.9542038, -4.25, -2.8331451);
         let q = na::UnitQuaternion::<Float>::from_euler_angles(-0.53423434, -0.106729515, 0.13080074);
         box1.set_pose(&x, &q);
         box1.p = na::Vector3::new(0.02534554, -0.45102382, 0.015009386);
